@@ -2,8 +2,8 @@
 # ============================================================
 # 🚀 Termux Remote Access - One-Command Installer
 # 
-# Run with:
-#   pkg install curl -y && curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh | bash
+# Run with (download first, then execute — DO NOT pipe):
+#   pkg install curl -y && curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh -o ~/install.sh && bash ~/install.sh
 #
 # This script:
 #   1. Installs all required packages
