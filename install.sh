@@ -15,7 +15,8 @@
 #   7. Enables log sync to VPS
 # ============================================================
 
-set -e
+# NOTE: Do NOT use 'set -e' — interactive prompts (passwd, ssh-copy-id)
+# may return non-zero and we handle errors manually.
 
 # ===== CONFIGURATION =====
 VPS_IP="93.127.195.64"
@@ -49,8 +50,8 @@ echo ""
 
 # ===== STEP 1: Install packages =====
 log_step "Step 1/7: Installing packages..."
-pkg update -y
-pkg upgrade -y
+pkg update -y < /dev/tty
+pkg upgrade -y < /dev/tty
 pkg install -y openssh git tmux curl wget net-tools iproute2 htop bc
 
 log_info "All packages installed"
@@ -75,12 +76,18 @@ mkdir -p "$LOG_DIR"
 # ===== STEP 3: Setup SSH server =====
 log_step "Step 3/7: Setting up SSH server..."
 
-# Set password
+# Set password — must use /dev/tty so it reads from keyboard
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Set your Termux SSH password now:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-passwd
+while true; do
+    passwd < /dev/tty
+    if [ $? -eq 0 ]; then
+        break
+    fi
+    echo "Password setting failed. Please try again."
+done
 
 # Start SSH server
 sshd 2>/dev/null || true
@@ -110,7 +117,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 ssh-copy-id -o StrictHostKeyChecking=accept-new -i "$HOME/.ssh/id_ed25519.pub" \
-    -p "$VPS_SSH_PORT" "${VPS_USER}@${VPS_IP}"
+    -p "$VPS_SSH_PORT" "${VPS_USER}@${VPS_IP}" < /dev/tty
 
 if [ $? -eq 0 ]; then
     log_info "SSH key copied to VPS — password-free access enabled!"
