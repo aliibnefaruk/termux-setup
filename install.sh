@@ -76,38 +76,12 @@ mkdir -p "$LOG_DIR"
 # ===== STEP 3: Setup SSH server =====
 log_step "Step 3/7: Setting up SSH server..."
 
-# Set password — use read + pipe since passwd doesn't work with stdin redirect
+# Set password — since we download-then-run, stdin is the real terminal
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Set your Termux SSH password now:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-while true; do
-    printf "New password: "
-    stty -echo 2>/dev/null
-    read PASS1
-    stty echo 2>/dev/null
-    echo ""
-    printf "Retype password: "
-    stty -echo 2>/dev/null
-    read PASS2
-    stty echo 2>/dev/null
-    echo ""
-    if [ -z "$PASS1" ]; then
-        echo "Password cannot be empty. Try again."
-        continue
-    fi
-    if [ "$PASS1" != "$PASS2" ]; then
-        echo "Passwords don't match. Try again."
-        continue
-    fi
-    echo -e "$PASS1\n$PASS1" | passwd >/dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        log_info "Password set successfully"
-        break
-    else
-        echo "Password setting failed. Try again."
-    fi
-done
+passwd
 
 # Start SSH server
 sshd 2>/dev/null || true
