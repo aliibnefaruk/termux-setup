@@ -50,8 +50,8 @@ echo ""
 
 # ===== STEP 1: Install packages =====
 log_step "Step 1/7: Installing packages..."
-pkg update -y < /dev/tty
-pkg upgrade -y < /dev/tty
+pkg update -y
+pkg upgrade -y
 pkg install -y openssh git tmux curl wget net-tools iproute2 htop bc
 
 log_info "All packages installed"
@@ -76,17 +76,37 @@ mkdir -p "$LOG_DIR"
 # ===== STEP 3: Setup SSH server =====
 log_step "Step 3/7: Setting up SSH server..."
 
-# Set password — must use /dev/tty so it reads from keyboard
+# Set password — use read + pipe since passwd doesn't work with stdin redirect
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Set your Termux SSH password now:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 while true; do
-    passwd < /dev/tty
-    if [ $? -eq 0 ]; then
-        break
+    printf "New password: "
+    stty -echo 2>/dev/null
+    read PASS1
+    stty echo 2>/dev/null
+    echo ""
+    printf "Retype password: "
+    stty -echo 2>/dev/null
+    read PASS2
+    stty echo 2>/dev/null
+    echo ""
+    if [ -z "$PASS1" ]; then
+        echo "Password cannot be empty. Try again."
+        continue
     fi
-    echo "Password setting failed. Please try again."
+    if [ "$PASS1" != "$PASS2" ]; then
+        echo "Passwords don't match. Try again."
+        continue
+    fi
+    echo -e "$PASS1\n$PASS1" | passwd >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        log_info "Password set successfully"
+        break
+    else
+        echo "Password setting failed. Try again."
+    fi
 done
 
 # Start SSH server
@@ -117,7 +137,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 ssh-copy-id -o StrictHostKeyChecking=accept-new -i "$HOME/.ssh/id_ed25519.pub" \
-    -p "$VPS_SSH_PORT" "${VPS_USER}@${VPS_IP}" < /dev/tty
+    -p "$VPS_SSH_PORT" "${VPS_USER}@${VPS_IP}"
 
 if [ $? -eq 0 ]; then
     log_info "SSH key copied to VPS — password-free access enabled!"
