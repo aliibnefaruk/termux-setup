@@ -76,12 +76,13 @@ mkdir -p "$LOG_DIR"
 # ===== STEP 3: Setup SSH server =====
 log_step "Step 3/7: Setting up SSH server..."
 
-# Set password — since we download-then-run, stdin is the real terminal
+# Set password — plain passwd, stdin is terminal since we run via 'bash ~/install.sh'
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Set your Termux SSH password now:"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Set your Termux SSH password (type it below):"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 passwd
+log_info "Password step done"
 
 # Start SSH server
 sshd 2>/dev/null || true
