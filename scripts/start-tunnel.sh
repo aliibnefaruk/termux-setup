@@ -23,11 +23,11 @@ log() {
 }
 
 check_ssh_running() {
-    if ! ss -tuln | grep -q ":${LOCAL_SSH_PORT}"; then
+    if ! pgrep -x sshd >/dev/null 2>&1; then
         log "⚠️  SSH server not running. Starting..."
         sshd
         sleep 1
-        if ss -tuln | grep -q ":${LOCAL_SSH_PORT}"; then
+        if pgrep -x sshd >/dev/null 2>&1; then
             log "✅ SSH server started on port ${LOCAL_SSH_PORT}"
         else
             log "❌ Failed to start SSH server"

@@ -18,6 +18,15 @@
 # NOTE: Do NOT use 'set -e' — interactive prompts (passwd, ssh-copy-id)
 # may return non-zero and we handle errors manually.
 
+# ===== AUTO-FIX: If running via pipe (curl|bash), save to file and re-run =====
+if [ ! -t 0 ]; then
+    echo "[>>] Detected pipe mode. Saving script and re-running..."
+    SCRIPT_URL="https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh"
+    curl -sL "$SCRIPT_URL" -o "$HOME/install.sh"
+    exec bash "$HOME/install.sh"
+    exit 0
+fi
+
 # ===== CONFIGURATION =====
 VPS_IP="93.127.195.64"
 VPS_USER="root"
@@ -76,22 +85,26 @@ mkdir -p "$LOG_DIR"
 # ===== STEP 3: Setup SSH server =====
 log_step "Step 3/7: Setting up SSH server..."
 
-# Set password — plain passwd, stdin is terminal since we run via 'bash ~/install.sh'
+# Set password
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Set your Termux SSH password (type it below):"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 passwd
-log_info "Password step done"
+if [ $? -eq 0 ]; then
+    log_info "Password set successfully"
+else
+    log_warn "Password not set — you can set it later with: passwd"
+fi
 
 # Start SSH server
 sshd 2>/dev/null || true
 
-if ss -tuln | grep -q ":${LOCAL_SSH_PORT}"; then
-    log_info "SSH server running on port ${LOCAL_SSH_PORT}"
+# Check if sshd is running (use pgrep — ss may fail with Permission denied in Termux)
+if pgrep -x sshd >/dev/null 2>&1; then
+    log_info "SSH server running (port ${LOCAL_SSH_PORT})"
 else
-    log_error "SSH server failed to start"
-    exit 1
+    log_warn "SSH server may not have started. Try running: sshd"
 fi
 
 # ===== STEP 4: Generate SSH key & copy to VPS =====
