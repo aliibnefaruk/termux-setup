@@ -23,8 +23,7 @@ if [ ! -t 0 ]; then
     echo "[>>] Detected pipe mode. Saving script and re-running..."
     SCRIPT_URL="https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh"
     curl -sL "$SCRIPT_URL" -o "$HOME/install.sh"
-    exec bash "$HOME/install.sh"
-    exit 0
+    exec bash "$HOME/install.sh" </dev/tty
 fi
 
 # ===== CONFIGURATION =====
