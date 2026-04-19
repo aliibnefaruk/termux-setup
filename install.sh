@@ -340,5 +340,4 @@ log_info "Wake lock requested (keeps Termux alive)"
 
 echo ""
 log_info "All done! "
-clear
 echo ""

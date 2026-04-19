@@ -568,7 +568,7 @@ async function deletePhone() {
   });
   if (resp.ok) {
     closePhoneModal();
-    loadPhones();
+    refreshDashboard();
   } else {
     alert('Failed to delete device');
   }
