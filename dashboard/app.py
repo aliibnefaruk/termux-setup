@@ -606,20 +606,25 @@ def api_ports_available():
 @login_required
 def api_delete_phone(phone_id):
     conn = get_db()
+    deleted_db = False
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT tunnel_port, user FROM phones WHERE phone_id=%s", (phone_id,))
             phone = cur.fetchone()
-            if not phone:
-                return jsonify({"success": False, "error": "Phone not found"}), 404
-            cur.execute("DELETE FROM phone_stats WHERE phone_id=%s", (phone_id,))
-            cur.execute("DELETE FROM phones WHERE phone_id=%s", (phone_id,))
+            if phone:
+                cur.execute("DELETE FROM phone_stats WHERE phone_id=%s", (phone_id,))
+                cur.execute("DELETE FROM phones WHERE phone_id=%s", (phone_id,))
+                deleted_db = True
     finally:
         conn.close()
-    # Clean up log dir
+    # Clean up log dir (works for legacy log-dir-only phones too)
     log_path = os.path.join(LOG_DIR, phone_id)
+    deleted_log = False
     if os.path.exists(log_path):
         shutil.rmtree(log_path, ignore_errors=True)
+        deleted_log = True
+    if not deleted_db and not deleted_log:
+        return jsonify({"success": False, "error": "Phone not found"}), 404
     return jsonify({"success": True})
 
 
