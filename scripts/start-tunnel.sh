@@ -5,6 +5,12 @@
 # Usage: ./start-tunnel.sh <VPS_USER> <VPS_IP> [VPS_PORT] [TUNNEL_PORT]
 # ============================================
 
+# Ensure Termux paths are available (critical when run from tmux)
+export PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+export PATH="$PREFIX/bin:$PREFIX/sbin:$PATH"
+export LD_LIBRARY_PATH="$PREFIX/lib"
+export HOME="${HOME:-/data/data/com.termux/files/home}"
+
 # --- Configuration ---
 VPS_USER="${1:-root}"
 VPS_IP="${2:-93.127.195.64}"
@@ -23,30 +29,27 @@ log() {
 }
 
 check_ssh_running() {
-    if ! pgrep -x sshd >/dev/null 2>&1; then
-        log "⚠️  SSH server not running. Starting..."
-        # Generate host keys if missing (common on fresh Termux installs)
-        if [ ! -f "$PREFIX/etc/ssh/ssh_host_rsa_key" ]; then
-            log "Generating SSH host keys..."
-            ssh-keygen -A 2>/dev/null
-        fi
-        sshd
-        sleep 1
-        if pgrep -x sshd >/dev/null 2>&1; then
-            log "✅ SSH server started on port ${LOCAL_SSH_PORT}"
-        else
-            # Last resort: regenerate keys and retry
-            log "Retrying with fresh host keys..."
-            ssh-keygen -A 2>/dev/null
-            sshd
-            sleep 1
-            if pgrep -x sshd >/dev/null 2>&1; then
-                log "✅ SSH server started on port ${LOCAL_SSH_PORT}"
-            else
-                log "❌ Failed to start SSH server. Run: sshd -d"
-                return 1
-            fi
-        fi
+    # Check if sshd is running via pgrep OR if port 8022 is responding
+    if pgrep -x sshd >/dev/null 2>&1; then
+        return 0
+    fi
+    # Fallback: check if port 8022 is actually listening (runsv may manage sshd)
+    if (echo > /dev/tcp/127.0.0.1/${LOCAL_SSH_PORT}) 2>/dev/null; then
+        log "✅ SSH server detected on port ${LOCAL_SSH_PORT}"
+        return 0
+    fi
+    log "⚠️  SSH server not running. Starting..."
+    # Generate host keys if missing
+    if [ ! -f "$PREFIX/etc/ssh/ssh_host_rsa_key" ]; then
+        log "Generating SSH host keys..."
+        ssh-keygen -A 2>/dev/null
+    fi
+    sshd
+    sleep 1
+    if pgrep -x sshd >/dev/null 2>&1 || (echo > /dev/tcp/127.0.0.1/${LOCAL_SSH_PORT}) 2>/dev/null; then
+        log "✅ SSH server started on port ${LOCAL_SSH_PORT}"
+    else
+        log "⚠️ Could not confirm SSH server — trying tunnel anyway"
     fi
     return 0
 }
