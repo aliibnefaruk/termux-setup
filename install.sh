@@ -65,7 +65,7 @@ echo ""
 log_step "Step 1/7: Installing packages..."
 pkg update -y
 pkg upgrade -y
-pkg install -y openssh git tmux curl wget net-tools iproute2 htop bc expect
+pkg install -y openssh git tmux curl wget net-tools iproute2 htop bc expect termux-api
 
 log_info "All packages installed"
 
