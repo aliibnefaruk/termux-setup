@@ -46,7 +46,7 @@ start_tunnel() {
         -o ExitOnForwardFailure=yes \
         -o ConnectTimeout=15 \
         -N \
-        -R ${TUNNEL_PORT}:localhost:${LOCAL_SSH_PORT} \
+        -R 0.0.0.0:${TUNNEL_PORT}:localhost:${LOCAL_SSH_PORT} \
         -p ${VPS_SSH_PORT} \
         ${VPS_USER}@${VPS_IP}
 

@@ -142,10 +142,12 @@ echo "[VPS] Configuring SSH for reverse tunnel..."
 SSHD_CONFIG="/etc/ssh/sshd_config"
 
 # Enable GatewayPorts if not set
-if ! grep -q "^GatewayPorts" "$SSHD_CONFIG"; then
+if grep -q "^GatewayPorts" "$SSHD_CONFIG"; then
+    sed -i 's/^GatewayPorts.*/GatewayPorts yes/' "$SSHD_CONFIG"
+else
     echo "" >> "$SSHD_CONFIG"
     echo "# Termux remote access tunnel" >> "$SSHD_CONFIG"
-    echo "GatewayPorts clientspecified" >> "$SSHD_CONFIG"
+    echo "GatewayPorts yes" >> "$SSHD_CONFIG"
 fi
 
 # Enable keep-alive if not set
