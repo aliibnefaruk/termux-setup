@@ -49,14 +49,14 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-log_info()  { echo -e "${GREEN}[✅]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[⚠️]${NC} $1"; }
-log_error() { echo -e "${RED}[❌]${NC} $1"; }
-log_step()  { echo -e "${CYAN}[>>]${NC} $1"; }
+log_info()  { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warn()  { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_step()  { echo -e "${CYAN}[STEP]${NC} $1"; }
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  📱 Termux Remote Access - Auto Installer    ║"
+echo "║   CTBERTERM AUTOMATION    ║"
 echo "║  VPS: ${VPS_USER}@${VPS_IP}                  ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
