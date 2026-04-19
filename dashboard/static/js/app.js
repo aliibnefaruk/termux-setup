@@ -254,7 +254,7 @@ async function runModalCmd() {
 
   if (data) {
     if (data.output) output.innerHTML += '\n' + esc(data.output);
-    if (data.error && data.code !== 0) output.innerHTML += '\n<span class="error">' + esc(data.error) + '</span>';
+    if (data.error) output.innerHTML += '\n<span class="' + (data.code !== 0 ? 'error' : 'info') + '">' + esc(data.error) + '</span>';
   } else {
     output.innerHTML += '\n<span class="error">Network error</span>';
   }
@@ -584,7 +584,7 @@ async function runCmd() {
 
   if (data) {
     if (data.output) output.innerHTML += '\n' + esc(data.output);
-    if (data.error && data.code !== 0) output.innerHTML += '\n<span class="error">' + esc(data.error) + '</span>';
+    if (data.error) output.innerHTML += '\n<span class="' + (data.code !== 0 ? 'error' : 'info') + '">' + esc(data.error) + '</span>';
   } else {
     output.innerHTML += '\n<span class="error">Network error</span>';
   }
@@ -626,7 +626,7 @@ async function loadInvites() {
 
   const list = data.invites || [];
   if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">No invites created yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">No invites created yet</td></tr>';
     return;
   }
 
@@ -635,8 +635,18 @@ async function loadInvites() {
     '<td>' + inv.port + '</td>' +
     '<td><span class="badge ' + (inv.used ? 'badge-green' : 'badge-yellow') + '">' + (inv.used ? 'USED' : 'PENDING') + '</span></td>' +
     '<td>' + esc(inv.used_by || '\u2014') + '</td>' +
-    '<td style="color:var(--text-muted)">' + esc(inv.created) + '</td></tr>'
+    '<td style="color:var(--text-muted)">' + esc(inv.created) + '</td>' +
+    '<td><button class="btn btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteInvite(\'' + esc(inv.token) + '\')">Delete</button></td></tr>'
   ).join('');
+}
+
+async function deleteInvite(token) {
+  if (!confirm('Delete this invite token?')) return;
+  const resp = await fetch('/api/invite/' + encodeURIComponent(token), {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' }
+  });
+  if (resp.ok) loadInvites();
 }
 
 async function generateInvite() {

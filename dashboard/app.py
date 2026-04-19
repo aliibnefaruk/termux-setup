@@ -290,13 +290,13 @@ def _parse_stats_file(filepath):
 
 # ───────────────────────── COMMANDS ─────────────────────────
 
-def run_phone_command(port, user, command, phone_id=None, ssh_password=None):
+def run_phone_command(port, user, command, phone_id=None, ssh_password=None, timeout=30):
     try:
         ssh_cmd = ["ssh", "-4", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
                    "-p", str(port), f"{user}@127.0.0.1", command]
         if ssh_password:
             ssh_cmd = ["sshpass", "-p", ssh_password] + ssh_cmd
-        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
         out = {"output": r.stdout, "error": r.stderr, "code": r.returncode}
     except subprocess.TimeoutExpired:
         out = {"output": "", "error": "Command timed out", "code": -1}
@@ -489,7 +489,12 @@ def api_command():
         conn.close()
     except Exception:
         pass
-    return jsonify(run_phone_command(port, user, cmd, phone_id=phone_id, ssh_password=ssh_password))
+    cmd_timeout = int(data.get("timeout", 30))
+    if cmd_timeout < 5:
+        cmd_timeout = 5
+    if cmd_timeout > 300:
+        cmd_timeout = 300
+    return jsonify(run_phone_command(port, user, cmd, phone_id=phone_id, ssh_password=ssh_password, timeout=cmd_timeout))
 
 
 @app.route("/api/invite", methods=["POST"])
@@ -523,6 +528,21 @@ def api_invites():
             "used_at": r["used_at"].strftime("%Y-%m-%d %H:%M:%S") if r["used_at"] else None,
         })
     return jsonify({"invites": invites})
+
+
+@app.route("/api/invite/<token>", methods=["DELETE"])
+@login_required
+def api_delete_invite(token):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM invites WHERE token=%s", (token,))
+            conn.commit()
+            if cur.rowcount == 0:
+                return jsonify({"success": False, "error": "Invite not found"}), 404
+    finally:
+        conn.close()
+    return jsonify({"success": True})
 
 
 @app.route("/api/register", methods=["POST"])
@@ -770,7 +790,7 @@ def api_phone_download(phone_id):
         if pw:
             scp_cmd = ["sshpass", "-p", pw] + scp_cmd
 
-        r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=600)
         if r.returncode != 0 or not os.path.exists(local_path):
             shutil.rmtree(tmp_dir, ignore_errors=True)
             return jsonify({"error": f"Download failed: {r.stderr.strip()}"}), 500
@@ -806,7 +826,7 @@ def api_phone_download_zip(phone_id):
         remote_tmp = f"/data/data/com.termux/files/home/.download_tmp_{int(time.time())}.tar.gz"
         quoted_paths = " ".join(f'"{p}"' for p in paths)
         tar_cmd = f'tar czf "{remote_tmp}" {quoted_paths} 2>&1; echo "___EXIT:$?"'
-        result = run_phone_command(port, user, tar_cmd, ssh_password=pw)
+        result = run_phone_command(port, user, tar_cmd, ssh_password=pw, timeout=600)
 
         local_zip = os.path.join(tmp_dir, "download.tar.gz")
         scp_cmd = ["scp", "-4", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
@@ -814,10 +834,10 @@ def api_phone_download_zip(phone_id):
         if pw:
             scp_cmd = ["sshpass", "-p", pw] + scp_cmd
 
-        r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=300)
+        r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=600)
 
         # Cleanup remote temp file
-        run_phone_command(port, user, f'rm -f "{remote_tmp}"', ssh_password=pw)
+        run_phone_command(port, user, f'rm -f "{remote_tmp}"', ssh_password=pw, timeout=10)
 
         if r.returncode != 0 or not os.path.exists(local_zip):
             shutil.rmtree(tmp_dir, ignore_errors=True)

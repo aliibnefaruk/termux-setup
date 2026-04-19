@@ -71,6 +71,13 @@
       <button class="quick-cmd" onclick="quickCmd('termux-setup-storage 2>/dev/null && echo Storage setup done || echo Run manually in Termux')">Setup Storage</button>
     </div>
 
+    <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:0.6rem 0.8rem;margin:0.5rem 0;font-size:0.7rem;color:var(--text-dim)">
+      <strong style="color:var(--text)">termux-api setup:</strong>
+      1. Run <code>pkg install termux-api</code> on the phone &nbsp;
+      2. Install the <strong>Termux:API</strong> app from F-Droid (separate app) &nbsp;
+      3. Grant permissions (camera, mic, etc.) when prompted on first use
+    </div>
+
     <!-- Command input -->
     <div class="terminal-input-row">
       <select id="cmdPhone" class="form-select terminal-phone-select"></select>
