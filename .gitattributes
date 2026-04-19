@@ -1,3 +1,4 @@
-# Force Unix line endings for all shell scripts
+# Force Unix line endings for all shell scripts and Python
 *.sh text eol=lf
+*.py text eol=lf
 install.sh text eol=lf
