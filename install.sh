@@ -140,33 +140,35 @@ else
     log_info "SSH key already exists"
 fi
 
-# Check if VPS key auth already works (skip everything if it does)
+# Check if VPS key auth already works (skip key copy if it does)
 VPS_AUTH_OK=false
 if ssh -o BatchMode=yes -o ConnectTimeout=5 -p "$VPS_SSH_PORT" "${VPS_USER}@${VPS_IP}" "echo ok" >/dev/null 2>&1; then
     log_info "VPS key auth already working — skipping key copy"
     VPS_AUTH_OK=true
 fi
 
-if [ "$VPS_AUTH_OK" = false ]; then
-    PUB_KEY=$(cat "$HOME/.ssh/id_ed25519.pub")
+PUB_KEY=$(cat "$HOME/.ssh/id_ed25519.pub")
 
-    if [ -n "$TOKEN" ]; then
-        # === METHOD 1: Invite token (no VPS password needed!) ===
-        log_info "Using invite token to register phone..."
-        REGISTER_RESULT=$(curl -sf -X POST "${DASH_URL}/api/register" \
-            -H "Content-Type: application/json" \
-            -d "{\"token\":\"$TOKEN\",\"public_key\":\"$PUB_KEY\",\"user\":\"$(whoami)\",\"tunnel_port\":$TUNNEL_PORT}" 2>&1)
+# Always register with dashboard if TOKEN is provided (even on reinstall)
+if [ -n "$TOKEN" ]; then
+    log_info "Registering phone with dashboard..."
+    REGISTER_RESULT=$(curl -sf -X POST "${DASH_URL}/api/register" \
+        -H "Content-Type: application/json" \
+        -d "{\"token\":\"$TOKEN\",\"public_key\":\"$PUB_KEY\",\"user\":\"$(whoami)\",\"tunnel_port\":$TUNNEL_PORT}" 2>&1)
 
-        if echo "$REGISTER_RESULT" | grep -q '"success"'; then
-            log_info "Phone registered via dashboard — key added to VPS!"
-        else
-            log_error "Token registration failed: $REGISTER_RESULT"
-            log_warn "Falling back to interactive mode..."
-            TOKEN=""
-        fi
+    if echo "$REGISTER_RESULT" | grep -q '"success"'; then
+        log_info "Phone registered via dashboard!"
+        # If key wasn't copied yet, dashboard handles it
+        VPS_AUTH_OK=true
+    else
+        log_warn "Dashboard registration: $REGISTER_RESULT"
+        log_warn "Continuing anyway — key may already be on VPS"
     fi
+fi
 
-    if [ -z "$TOKEN" ] && [ -n "$VPS_PASS" ]; then
+if [ "$VPS_AUTH_OK" = false ]; then
+
+    if [ -n "$VPS_PASS" ]; then
         # === METHOD 2: VPS password (auto) ===
         log_info "Copying SSH key to VPS (auto-mode)..."
         expect -c "
@@ -177,10 +179,8 @@ if [ "$VPS_AUTH_OK" = false ]; then
                 eof { }
             }
         " >/dev/null 2>&1
-    fi
-
-    if [ -z "$TOKEN" ] && [ -z "$VPS_PASS" ]; then
-        # === METHOD 3: Interactive ===
+    elif [ -z "$TOKEN" ]; then
+        # === METHOD 3: Interactive (only if no TOKEN and no VPS_PASS) ===
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "  Copying SSH key to VPS (${VPS_USER}@${VPS_IP})"
@@ -265,12 +265,14 @@ else
 
     tmux new-session -d -s tunnel "bash $INSTALL_DIR/scripts/start-tunnel.sh ${VPS_USER} ${VPS_IP} ${VPS_SSH_PORT} ${TUNNEL_PORT}"
 
-    sleep 3
+    sleep 5
 
     if tmux has-session -t tunnel 2>/dev/null; then
         log_info "Tunnel started in tmux session 'tunnel'"
     else
         log_error "Tunnel session failed to start"
+        log_warn "Try manually: bash ~/termux-setup/scripts/start-tunnel.sh ${VPS_USER} ${VPS_IP} ${VPS_SSH_PORT} ${TUNNEL_PORT}"
+        log_warn "Check log: cat ~/tunnel.log"
     fi
 fi
 
