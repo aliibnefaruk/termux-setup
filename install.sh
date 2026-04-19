@@ -296,9 +296,9 @@ echo "╔═══════════════════════�
 echo "║           🎉 SETUP COMPLETE!                        ║"
 echo "╠══════════════════════════════════════════════════════╣"
 echo "║                                                      ║"
-echo "║  📱 Phone SSH:  port ${LOCAL_SSH_PORT}               ║"
-echo "║  🔗 Tunnel:     VPS:${TUNNEL_PORT} → Phone:${LOCAL_SSH_PORT}  ║"
-echo "║  🌐 VPS:        ${VPS_USER}@${VPS_IP}               ║"
+echo "║   Phone SSH:  port ${LOCAL_SSH_PORT}               ║"
+echo "║   Tunnel:     VPS:${TUNNEL_PORT} → Phone:${LOCAL_SSH_PORT}  ║"
+echo "║   VPS:        ${VPS_USER}@${VPS_IP}               ║"
 echo "║                                                      ║"
 echo "║  From PC/Phone2, run:                                ║"
 echo "║    ssh -p ${TUNNEL_PORT} ${USER_NAME}@${VPS_IP}      ║"
@@ -339,5 +339,6 @@ termux-wake-lock 2>/dev/null || true
 log_info "Wake lock requested (keeps Termux alive)"
 
 echo ""
-log_info "All done! Your phone is now accessible remotely."
+log_info "All done! "
+clear
 echo ""
