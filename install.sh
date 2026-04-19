@@ -230,12 +230,12 @@ fi
 mkdir -p /var/log/termux-remote
 chmod 755 /var/log/termux-remote
 
-# Open firewall port 2222 if firewall exists
+# Open firewall ports for tunnel range if firewall exists
 if command -v ufw &>/dev/null; then
-    ufw allow 2222/tcp 2>/dev/null || true
+    ufw allow 2222:2250/tcp 2>/dev/null || true
     ufw allow 8080/tcp 2>/dev/null || true
 elif command -v firewall-cmd &>/dev/null; then
-    firewall-cmd --permanent --add-port=2222/tcp 2>/dev/null || true
+    firewall-cmd --permanent --add-port=2222-2250/tcp 2>/dev/null || true
     firewall-cmd --permanent --add-port=8080/tcp 2>/dev/null || true
     firewall-cmd --reload 2>/dev/null || true
 fi
@@ -243,7 +243,7 @@ fi
 # Restart SSH
 systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null
 
-echo "[VPS] ✅ Configuration complete"
+echo "[VPS] [SUCCESS] Configuration complete"
 echo "[VPS] Log directory: /var/log/termux-remote/"
 VPSEOF
 
@@ -293,7 +293,7 @@ fi
 USER_NAME=$(whoami)
 echo ""
 echo "╔══════════════════════════════════════════════════════╗"
-echo "║           🎉 SETUP COMPLETE!                        ║"
+echo "║            [SUCCESS] SETUP COMPLETE!                        ║"
 echo "╠══════════════════════════════════════════════════════╣"
 echo "║                                                      ║"
 echo "║   Phone SSH:  port ${LOCAL_SSH_PORT}               ║"

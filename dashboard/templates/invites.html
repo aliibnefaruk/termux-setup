@@ -20,9 +20,9 @@
       <div class="form-group">
         <label class="form-label">Tunnel Port</label>
         <input type="number" id="invitePort" class="form-input"
-               value="2223" min="2222" max="2230">
-        <div style="color:var(--text-muted);font-size:0.65rem;margin-top:4px">
-          2222 = first phone, 2223 = second, etc.
+               value="2222" min="2222" max="2250">
+        <div id="portHint" style="color:var(--text-muted);font-size:0.65rem;margin-top:4px">
+          Loading available ports...
         </div>
       </div>
       <button class="btn btn-green" onclick="generateInvite()" style="width:100%">

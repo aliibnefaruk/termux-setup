@@ -199,9 +199,13 @@ function openPhoneModal(idx) {
   const bc = document.getElementById('fileBreadcrumb');
   if (bc) bc.textContent = '/sdcard';
 
-  // Config tab — password
+  // Config tab — password + port
   const pwInput = document.getElementById('pmPassword');
   if (pwInput) pwInput.value = phone.ssh_password || '';
+  const portInput = document.getElementById('pmTunnelPort');
+  if (portInput) portInput.value = phone.tunnel_port || 2222;
+  const nameInput = document.getElementById('pmPhoneName');
+  if (nameInput) nameInput.value = phone.name || '';
 
   // Show modal
   overlay.classList.add('active');
@@ -530,26 +534,44 @@ async function savePhoneConfig() {
   if (!phone) return;
   const pw = document.getElementById('pmPassword').value;
   const name = document.getElementById('pmPhoneName').value || phone.name;
+  const portVal = parseInt(document.getElementById('pmTunnelPort').value) || phone.tunnel_port;
 
   const data = await apiPost('/api/phone/' + encodeURIComponent(phone.id) + '/config', {
     ssh_password: pw,
-    name: name
+    name: name,
+    tunnel_port: portVal
   });
 
   const msg = document.getElementById('pmConfigMsg');
   if (data && data.success) {
     msg.textContent = '[ SAVED ]';
     msg.style.color = 'var(--green)';
-    // Update local data
     phone.ssh_password = pw;
     phone.name = name;
     phone.has_password = !!pw;
+    phone.tunnel_port = portVal;
   } else {
     msg.textContent = '[ ERROR ] ' + (data ? data.error : 'Failed');
     msg.style.color = 'var(--red)';
   }
   msg.style.display = 'block';
   setTimeout(() => msg.style.display = 'none', 3000);
+}
+
+async function deletePhone() {
+  const phone = activeModalPhone;
+  if (!phone) return;
+  if (!confirm('Delete device "' + phone.name + '"? This removes it from the dashboard.')) return;
+  const resp = await fetch('/api/phone/' + encodeURIComponent(phone.id), {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' }
+  });
+  if (resp.ok) {
+    closePhoneModal();
+    loadPhones();
+  } else {
+    alert('Failed to delete device');
+  }
 }
 
 function togglePasswordVis(btn) {
@@ -647,6 +669,19 @@ async function deleteInvite(token) {
     headers: { 'Content-Type': 'application/json' }
   });
   if (resp.ok) loadInvites();
+}
+
+async function loadAvailablePorts() {
+  const data = await apiGet('/api/ports/available');
+  if (!data) return;
+  const portInput = document.getElementById('invitePort');
+  const hint = document.getElementById('portHint');
+  if (portInput && data.next_available) portInput.value = data.next_available;
+  if (hint) {
+    const usedPorts = data.used || {};
+    const usedList = Object.entries(usedPorts).map(([p, name]) => p + ' (' + esc(name) + ')').join(', ');
+    hint.innerHTML = usedList ? '<strong>Used:</strong> ' + usedList + '<br>Next available: <strong>' + data.next_available + '</strong>' : 'All ports available. Using ' + data.next_available;
+  }
 }
 
 async function generateInvite() {
@@ -857,7 +892,10 @@ document.addEventListener('DOMContentLoaded', () => {
   if (pmInput) pmInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runModalCmd(); });
 
   // Invites
-  if (page === '/invites') loadInvites();
+  if (page === '/invites') {
+    loadInvites();
+    loadAvailablePorts();
+  }
 
   // Settings
   if (page === '/settings') {

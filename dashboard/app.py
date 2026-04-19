@@ -501,11 +501,13 @@ def api_command():
 @login_required
 def api_invite():
     data = request.get_json(silent=True) or {}
-    port = data.get("port", 2222)
+    port = data.get("port")
+    if not port:
+        port = _next_available_port()
     token = create_invite(port)
     return jsonify({
-        "success": True, "token": token,
-        "install_command": f"export PHONE_PASS=SETPASSWORD TOKEN={token}; curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh | bash",
+        "success": True, "token": token, "port": port,
+        "install_command": f"export PHONE_PASS=SETPASSWORD TOKEN={token} TUNNEL_PORT={port}; curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh | bash",
     })
 
 
@@ -558,6 +560,67 @@ def api_register():
     if ok:
         return jsonify({"success": True, "message": msg})
     return jsonify({"success": False, "error": msg}), 403
+
+
+def _next_available_port():
+    """Find the next unused tunnel port (2222-2250)."""
+    used = set()
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT tunnel_port FROM phones")
+            for row in cur.fetchall():
+                if row["tunnel_port"]:
+                    used.add(int(row["tunnel_port"]))
+            cur.execute("SELECT tunnel_port FROM invites WHERE used=FALSE")
+            for row in cur.fetchall():
+                if row["tunnel_port"]:
+                    used.add(int(row["tunnel_port"]))
+    finally:
+        conn.close()
+    for p in range(2222, 2251):
+        if p not in used:
+            return p
+    return 2222
+
+
+@app.route("/api/ports/available")
+@login_required
+def api_ports_available():
+    """Return used ports and next available port."""
+    used = {}
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT tunnel_port, user, name FROM phones")
+            for row in cur.fetchall():
+                if row["tunnel_port"]:
+                    used[int(row["tunnel_port"])] = row["name"] or row["user"]
+    finally:
+        conn.close()
+    next_port = _next_available_port()
+    return jsonify({"used": used, "next_available": next_port})
+
+
+@app.route("/api/phone/<phone_id>", methods=["DELETE"])
+@login_required
+def api_delete_phone(phone_id):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT tunnel_port, user FROM phones WHERE phone_id=%s", (phone_id,))
+            phone = cur.fetchone()
+            if not phone:
+                return jsonify({"success": False, "error": "Phone not found"}), 404
+            cur.execute("DELETE FROM phone_stats WHERE phone_id=%s", (phone_id,))
+            cur.execute("DELETE FROM phones WHERE phone_id=%s", (phone_id,))
+    finally:
+        conn.close()
+    # Clean up log dir
+    log_path = os.path.join(LOG_DIR, phone_id)
+    if os.path.exists(log_path):
+        shutil.rmtree(log_path, ignore_errors=True)
+    return jsonify({"success": True})
 
 
 @app.route("/api/stats", methods=["POST"])
@@ -685,6 +748,9 @@ def api_phone_config_update(phone_id):
                 if "ssh_password" in data:
                     updates.append("ssh_password=%s")
                     params.append(data["ssh_password"])
+                if "tunnel_port" in data:
+                    updates.append("tunnel_port=%s")
+                    params.append(int(data["tunnel_port"]))
                 if not updates:
                     return jsonify({"error": "Nothing to update"}), 400
                 params.append(phone_id)
