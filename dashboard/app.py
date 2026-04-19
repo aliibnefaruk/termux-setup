@@ -292,8 +292,8 @@ def _parse_stats_file(filepath):
 
 def run_phone_command(port, user, command, phone_id=None, ssh_password=None):
     try:
-        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
-                   "-p", str(port), f"{user}@localhost", command]
+        ssh_cmd = ["ssh", "-4", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                   "-p", str(port), f"{user}@127.0.0.1", command]
         if ssh_password:
             ssh_cmd = ["sshpass", "-p", ssh_password] + ssh_cmd
         r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
@@ -700,7 +700,9 @@ def api_phone_files(phone_id):
     if not port:
         return jsonify({"error": "Phone not found"}), 404
 
-    cmd = f'ls -la --time-style=long-iso "{path}" 2>&1; echo "___EXIT:$?"'
+    # Ensure trailing slash for directory listing (handles symlinks like /sdcard)
+    browse_path = path.rstrip("/") + "/"
+    cmd = f'ls -laL "{browse_path}" 2>&1; echo "___EXIT:$?"'
     result = run_phone_command(port, user, cmd, ssh_password=pw)
     raw = result.get("output", "") + result.get("error", "")
 
@@ -710,31 +712,36 @@ def api_phone_files(phone_id):
             continue
         if line.startswith("total ") or not line.strip():
             continue
-        parts = line.split(None, 7)
-        if len(parts) < 8:
+        # Parse: perms links owner group size month day time/year name...
+        # Example: drwxrws---.  3 u0_a316  media_rw    3452 Apr 18 15:02 dirname
+        # Example: -rw-r--r--.  1 u0_a316  media_rw    1234 Jan  1  2025 filename
+        parts = line.split()
+        if len(parts) < 9:
             continue
         perms = parts[0]
-        size_str = parts[4]
-        date_str = parts[5]
-        time_str = parts[6]
-        name = parts[7]
+        if len(perms) < 2 or perms[0] not in "dlcbps-":
+            continue
+        try:
+            size = int(parts[4])
+        except (ValueError, IndexError):
+            size = 0
+        date_info = " ".join(parts[5:8])  # "Apr 18 15:02" or "Jan  1  2025"
+        name = " ".join(parts[8:])  # handles names with spaces
+
+        name = name.strip()
         if name in (".", ".."):
             continue
         is_dir = perms.startswith("d")
         is_link = perms.startswith("l")
         if is_link and " -> " in name:
-            name = name.split(" -> ")[0]
-        try:
-            size = int(size_str)
-        except ValueError:
-            size = 0
+            name = name.split(" -> ")[0].strip()
         files.append({
             "name": name,
             "is_dir": is_dir,
             "is_link": is_link,
             "perms": perms,
             "size": size,
-            "date": f"{date_str} {time_str}",
+            "date": date_info,
         })
 
     # Sort: dirs first, then files
@@ -758,8 +765,8 @@ def api_phone_download(phone_id):
         fname = os.path.basename(file_path)
         local_path = os.path.join(tmp_dir, fname)
 
-        scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-                    "-P", str(port), f"{user}@localhost:{file_path}", local_path]
+        scp_cmd = ["scp", "-4", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                    "-P", str(port), f"{user}@127.0.0.1:{file_path}", local_path]
         if pw:
             scp_cmd = ["sshpass", "-p", pw] + scp_cmd
 
@@ -802,8 +809,8 @@ def api_phone_download_zip(phone_id):
         result = run_phone_command(port, user, tar_cmd, ssh_password=pw)
 
         local_zip = os.path.join(tmp_dir, "download.tar.gz")
-        scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-                    "-P", str(port), f"{user}@localhost:{remote_tmp}", local_zip]
+        scp_cmd = ["scp", "-4", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                    "-P", str(port), f"{user}@127.0.0.1:{remote_tmp}", local_zip]
         if pw:
             scp_cmd = ["sshpass", "-p", pw] + scp_cmd
 
