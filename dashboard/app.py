@@ -1,81 +1,91 @@
 #!/usr/bin/env python3
 """
-Termux Remote Access - Web Dashboard
-Runs on VPS to monitor all connected phones.
+Termux Remote Access — Web Dashboard (Flask + MySQL)
+Phone management console.
 """
 
 import os
 import json
 import subprocess
 import time
-import hashlib
 import secrets
+import tempfile
+import shutil
+import re
 from datetime import datetime
 from functools import wraps
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
 
-# ===== CONFIGURATION =====
-HOST = "0.0.0.0"
-PORT = int(os.environ.get("DASH_PORT", 8080))
+import pymysql
+from flask import (
+    Flask, request, jsonify, render_template,
+    redirect, url_for, session, abort, send_file,
+)
+
+# ===== APP SETUP =====
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+
+# ===== CONFIG =====
 ADMIN_PASS = os.environ.get("DASH_PASS", "admin")
 LOG_DIR = "/var/log/termux-remote"
-SESSION_SECRET = secrets.token_hex(32)
 VPS_USER = os.environ.get("VPS_USER", "root")
-INVITE_FILE = "/var/log/termux-remote/.invites.json"
-# Map of phone_id -> tunnel_port (auto-discovered)
-PHONES_CONFIG = {}
+DB_HOST = os.environ.get("DB_HOST", "localhost")
+DB_USER = os.environ.get("DB_USER", "termux")
+DB_PASS = os.environ.get("DB_PASS", "Termux@Dash2026!")
+DB_NAME = os.environ.get("DB_NAME", "termux_dashboard")
+ENV_FILE = "/opt/termux-dashboard/.env"
 
-# Active sessions (token -> expiry)
-sessions = {}
+# ───────────────────────── DB HELPERS ─────────────────────────
 
-# Invite tokens (token -> {port, created, used})
-invite_tokens = {}
-
-
-def load_invites():
-    """Load invite tokens from disk."""
-    global invite_tokens
-    try:
-        if os.path.exists(INVITE_FILE):
-            with open(INVITE_FILE, "r") as f:
-                invite_tokens = json.load(f)
-    except Exception:
-        invite_tokens = {}
+def get_db():
+    return pymysql.connect(
+        host=DB_HOST, user=DB_USER, password=DB_PASS,
+        database=DB_NAME, charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor, autocommit=True,
+    )
 
 
-def save_invites():
-    """Save invite tokens to disk."""
-    try:
-        with open(INVITE_FILE, "w") as f:
-            json.dump(invite_tokens, f)
-    except Exception:
-        pass
+# ───────────────────────── AUTH ─────────────────────────
 
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("authenticated"):
+            if request.is_json or request.path.startswith("/api/"):
+                return jsonify({"error": "unauthorized"}), 401
+            return redirect(url_for("login_page"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ───────────────────────── INVITE SYSTEM ─────────────────────────
 
 def create_invite(tunnel_port):
-    """Create a one-time invite token for a new phone."""
-    token = secrets.token_hex(8)  # 16-char token
-    invite_tokens[token] = {
-        "port": tunnel_port,
-        "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "used": False,
-    }
-    save_invites()
+    token = secrets.token_hex(8)
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO invites (token, tunnel_port) VALUES (%s, %s)",
+                (token, tunnel_port),
+            )
+    finally:
+        conn.close()
     return token
 
 
 def use_invite(token, public_key, user, tunnel_port):
-    """Redeem an invite token — add phone's SSH key to VPS authorized_keys."""
-    if token not in invite_tokens:
-        return False, "Invalid token"
-    if invite_tokens[token]["used"]:
-        return False, "Token already used"
-
-    # Add public key to VPS root authorized_keys
+    conn = get_db()
     try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM invites WHERE token=%s", (token,))
+            inv = cur.fetchone()
+        if not inv:
+            return False, "Invalid token"
+        if inv["used"]:
+            return False, "Token already used"
+
         auth_keys_path = os.path.expanduser(f"~{VPS_USER}/.ssh/authorized_keys")
-        # Check if key already exists
         existing = ""
         if os.path.exists(auth_keys_path):
             with open(auth_keys_path, "r") as f:
@@ -84,931 +94,780 @@ def use_invite(token, public_key, user, tunnel_port):
             with open(auth_keys_path, "a") as f:
                 f.write(f"\n{public_key.strip()}\n")
 
-        # Mark token as used
-        invite_tokens[token]["used"] = True
-        invite_tokens[token]["user"] = user
-        invite_tokens[token]["port"] = tunnel_port
-        save_invites()
-
-        # Create log directory for this phone
-        phone_dir = os.path.join(LOG_DIR, f"phone-{user}")
-        os.makedirs(phone_dir, exist_ok=True)
-
-        # Open firewall port if needed
-        try:
-            subprocess.run(
-                ["ufw", "allow", f"{tunnel_port}/tcp"],
-                capture_output=True,
-                timeout=5,
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE invites SET used=TRUE, used_by=%s, used_at=NOW() WHERE token=%s",
+                (user, token),
             )
+            phone_id = f"phone-{user}"
+            cur.execute(
+                """INSERT INTO phones (phone_id, name, user, tunnel_port, status, public_key, last_seen)
+                   VALUES (%s, %s, %s, %s, 'connected', %s, NOW())
+                   ON DUPLICATE KEY UPDATE tunnel_port=%s, public_key=%s, status='connected', last_seen=NOW()""",
+                (phone_id, phone_id, user, tunnel_port, public_key, tunnel_port, public_key),
+            )
+
+        os.makedirs(os.path.join(LOG_DIR, phone_id), exist_ok=True)
+        try:
+            subprocess.run(["ufw", "allow", f"{tunnel_port}/tcp"], capture_output=True, timeout=5)
         except Exception:
             pass
 
         return True, "Phone registered successfully"
     except Exception as e:
         return False, str(e)
+    finally:
+        conn.close()
 
 
-# Load invites on startup
-load_invites()
-
-
-def check_auth(token):
-    """Validate session token."""
-    if token in sessions and sessions[token] > time.time():
-        return True
-    return False
-
-
-def create_session():
-    """Create a new session token."""
-    token = secrets.token_hex(32)
-    sessions[token] = time.time() + 86400  # 24 hours
-    return token
-
-
-def hash_password(password):
-    """Hash password for comparison."""
-    return hashlib.sha256(password.encode()).hexdigest()
-
+# ───────────────────────── PHONE DISCOVERY ─────────────────────────
 
 def get_connected_phones():
-    """Discover connected phones from tunnel connections and log dirs."""
     phones = []
+    seen_ids = set()
 
-    # Discover from log directories
+    # 1. Phones from DB
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM phones ORDER BY last_seen DESC")
+            db_phones = cur.fetchall()
+    finally:
+        conn.close()
+
+    for row in db_phones:
+        pid = row["phone_id"]
+        seen_ids.add(pid)
+        phones.append({
+            "id": pid,
+            "name": row["name"] or pid,
+            "user": row["user"],
+            "tunnel_port": row["tunnel_port"],
+            "status": row["status"] or "offline",
+            "stats": _get_phone_stats(pid),
+            "has_password": bool(row.get("ssh_password")),
+            "ssh_password": row.get("ssh_password") or "",
+            "last_seen": row["last_seen"].strftime("%Y-%m-%d %H:%M:%S") if row["last_seen"] else None,
+        })
+
+    # 2. Legacy log-dir phones not in DB
     if os.path.exists(LOG_DIR):
         for entry in os.listdir(LOG_DIR):
-            phone_dir = os.path.join(LOG_DIR, entry)
-            if os.path.isdir(phone_dir):
-                phone_id = entry
-                phone = {
-                    "id": phone_id,
-                    "name": phone_id,
-                    "user": phone_id.split("-", 1)[1] if "-" in phone_id else phone_id,
-                    "tunnel_port": None,
-                    "status": "unknown",
-                    "stats": {},
-                    "last_seen": None,
-                }
-                # Read stats
-                stats_file = os.path.join(phone_dir, "stats.log")
-                if os.path.exists(stats_file):
-                    phone["stats"] = parse_stats_file(stats_file)
-                    # Check last modified time
-                    mtime = os.path.getmtime(stats_file)
-                    phone["last_seen"] = datetime.fromtimestamp(mtime).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    # If stats updated in last 10 minutes, phone is likely active
-                    if time.time() - mtime < 600:
-                        phone["status"] = "active"
-                    else:
-                        phone["status"] = "stale"
+            d = os.path.join(LOG_DIR, entry)
+            if not os.path.isdir(d) or entry in seen_ids:
+                continue
+            seen_ids.add(entry)
+            ph = {
+                "id": entry, "name": entry,
+                "user": entry.split("-", 1)[1] if "-" in entry else entry,
+                "tunnel_port": None, "status": "unknown", "stats": {},
+                "has_password": False, "ssh_password": "", "last_seen": None,
+            }
+            stats_file = os.path.join(d, "stats.log")
+            if os.path.exists(stats_file):
+                ph["stats"] = _parse_stats_file(stats_file)
+                mt = os.path.getmtime(stats_file)
+                ph["last_seen"] = datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M:%S")
+                ph["status"] = "active" if time.time() - mt < 600 else "stale"
+            phones.append(ph)
 
-                phones.append(phone)
-
-    # Discover tunnel ports from ss
+    # 3. Discover live listening ports
+    listening = set()
     try:
-        result = subprocess.run(
-            ["ss", "-tuln"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        for line in result.stdout.splitlines():
+        r = subprocess.run(["ss", "-tuln"], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.splitlines():
             for port in range(2222, 2230):
                 if f":{port}" in line and "LISTEN" in line:
-                    # Find which phone has this port
-                    for phone in phones:
-                        if phone["tunnel_port"] is None:
-                            phone["tunnel_port"] = port
-                            break
-                    else:
-                        # Port active but no phone dir yet
-                        phones.append(
-                            {
-                                "id": f"unknown-{port}",
-                                "name": f"Phone (port {port})",
-                                "user": "unknown",
-                                "tunnel_port": port,
-                                "status": "connected",
-                                "stats": {},
-                                "last_seen": datetime.now().strftime(
-                                    "%Y-%m-%d %H:%M:%S"
-                                ),
-                            }
-                        )
+                    listening.add(port)
     except Exception:
         pass
 
-    # Check tunnel connectivity for each phone
-    for phone in phones:
-        port = phone.get("tunnel_port")
-        if port:
-            try:
-                result = subprocess.run(
-                    ["ss", "-tn", f"sport = :{port}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if "ESTAB" in result.stdout:
-                    phone["status"] = "connected"
-            except Exception:
-                pass
+    # 4. Assign listening ports to port-less phones FIRST (fixes dupe bug)
+    assigned = {p["tunnel_port"] for p in phones if p["tunnel_port"]}
+    unmatched_ports = sorted(listening - assigned)
+    portless = [p for p in phones if p["tunnel_port"] is None]
+    for ph, port in zip(portless, unmatched_ports):
+        ph["tunnel_port"] = port
+        assigned.add(port)
 
-    # Auto-assign ports if not found
-    used_ports = {p["tunnel_port"] for p in phones if p["tunnel_port"]}
-    port_counter = 2222
-    for phone in phones:
-        if phone["tunnel_port"] is None:
-            while port_counter in used_ports:
-                port_counter += 1
-            phone["tunnel_port"] = port_counter
-            used_ports.add(port_counter)
+    # 5. Remaining unknown ports
+    still_free = listening - assigned
+    for port in still_free:
+        phones.append({
+            "id": f"unknown-{port}", "name": f"Phone (port {port})", "user": "unknown",
+            "tunnel_port": port, "status": "connected", "stats": {},
+            "has_password": False, "ssh_password": "",
+            "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+    # 6. Live check ESTAB
+    for ph in phones:
+        port = ph.get("tunnel_port")
+        if not port:
+            continue
+        try:
+            r = subprocess.run(["ss", "-tn", f"sport = :{port}"], capture_output=True, text=True, timeout=5)
+            if "ESTAB" in r.stdout:
+                ph["status"] = "connected"
+        except Exception:
+            pass
+
+    # 7. Auto-assign remaining port-less phones
+    used = {p["tunnel_port"] for p in phones if p["tunnel_port"]}
+    pc = 2222
+    for ph in phones:
+        if ph["tunnel_port"] is None:
+            while pc in used:
+                pc += 1
+            ph["tunnel_port"] = pc
+            used.add(pc)
 
     return phones
 
 
-def parse_stats_file(filepath):
-    """Parse the last stats entry from a log file."""
+# ───────────────────────── STATS ─────────────────────────
+
+def _get_phone_stats(phone_id):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM phone_stats WHERE phone_id=%s ORDER BY recorded_at DESC LIMIT 1",
+                (phone_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return {}
+        return {
+            "BAT": f"{row['battery_level']}% ({row['battery_status']})" if row["battery_level"] is not None else "N/A",
+            "MEM": f"{row['memory_percent']}%" if row["memory_percent"] is not None else "N/A",
+            "STORAGE": f"{row['storage_percent']}%" if row["storage_percent"] is not None else "N/A",
+            "TUNNEL": row["tunnel_status"] or "N/A",
+            "PROCS": str(row["process_count"]) if row["process_count"] is not None else "N/A",
+            "timestamp": row["recorded_at"].strftime("%Y-%m-%d %H:%M:%S") if row["recorded_at"] else "",
+        }
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
+def _save_phone_stats(phone_id, stats):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO phone_stats
+                   (phone_id, battery_level, battery_status, memory_percent, storage_percent,
+                    tunnel_status, process_count, net_rx, net_tx)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (phone_id, stats.get("battery_level"), stats.get("battery_status", ""),
+                 stats.get("memory_percent"), stats.get("storage_percent"),
+                 stats.get("tunnel_status", "DOWN"), stats.get("process_count"),
+                 stats.get("net_rx", 0), stats.get("net_tx", 0)),
+            )
+            cur.execute("UPDATE phones SET last_seen=NOW(), status='active' WHERE phone_id=%s", (phone_id,))
+    finally:
+        conn.close()
+
+
+def _parse_stats_file(filepath):
     try:
         with open(filepath, "r") as f:
             lines = f.readlines()
         if not lines:
             return {}
-
-        last_line = lines[-1].strip()
-        stats = {}
-
-        # Parse format: timestamp | KEY:VALUE | KEY:VALUE ...
-        parts = last_line.split(" | ")
-        if parts:
-            stats["timestamp"] = parts[0].strip()
-
+        parts = lines[-1].strip().split(" | ")
+        stats = {"timestamp": parts[0].strip()} if parts else {}
         for part in parts[1:]:
-            part = part.strip()
             if ":" in part:
-                key, val = part.split(":", 1)
-                stats[key.strip()] = val.strip()
-
-        # Parse history (last 20 entries for charts)
-        history = []
-        for line in lines[-20:]:
-            entry = {}
-            parts = line.strip().split(" | ")
-            if parts:
-                entry["time"] = parts[0].strip()
-            for part in parts[1:]:
-                part = part.strip()
-                if ":" in part:
-                    key, val = part.split(":", 1)
-                    entry[key.strip()] = val.strip()
-            history.append(entry)
-        stats["history"] = history
-
+                k, v = part.strip().split(":", 1)
+                stats[k.strip()] = v.strip()
         return stats
     except Exception:
         return {}
 
 
-def get_tunnel_log(phone_id):
-    """Read tunnel log for a phone."""
-    log_path = os.path.join(LOG_DIR, phone_id, "tunnel.log")
-    try:
-        with open(log_path, "r") as f:
-            return f.read()[-5000:]  # Last 5KB
-    except Exception:
-        return "No tunnel log available"
+# ───────────────────────── COMMANDS ─────────────────────────
 
-
-def run_phone_command(phone_port, phone_user, command):
-    """Run a command on a connected phone via SSH tunnel."""
+def run_phone_command(port, user, command, phone_id=None, ssh_password=None):
     try:
-        result = subprocess.run(
-            [
-                "ssh",
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "ConnectTimeout=5",
-                "-p",
-                str(phone_port),
-                f"{phone_user}@localhost",
-                command,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        return {"output": result.stdout, "error": result.stderr, "code": result.returncode}
+        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                   "-p", str(port), f"{user}@localhost", command]
+        if ssh_password:
+            ssh_cmd = ["sshpass", "-p", ssh_password] + ssh_cmd
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=15)
+        out = {"output": r.stdout, "error": r.stderr, "code": r.returncode}
     except subprocess.TimeoutExpired:
-        return {"output": "", "error": "Command timed out", "code": -1}
+        out = {"output": "", "error": "Command timed out", "code": -1}
     except Exception as e:
-        return {"output": "", "error": str(e), "code": -1}
+        out = {"output": "", "error": str(e), "code": -1}
 
-
-class DashboardHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for the dashboard."""
-
-    def log_message(self, format, *args):
-        """Suppress default access logs."""
-        pass
-
-    def _get_cookie(self, name):
-        """Extract a cookie value."""
-        cookies = self.headers.get("Cookie", "")
-        for cookie in cookies.split(";"):
-            cookie = cookie.strip()
-            if cookie.startswith(f"{name}="):
-                return cookie[len(name) + 1 :]
-        return None
-
-    def _send_json(self, data, status=200):
-        """Send JSON response."""
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
-
-    def _send_html(self, html, status=200):
-        """Send HTML response."""
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(html.encode())
-
-    def _redirect(self, url):
-        """Send redirect."""
-        self.send_response(302)
-        self.send_header("Location", url)
-        self.end_headers()
-
-    def _is_authenticated(self):
-        """Check if request is authenticated."""
-        token = self._get_cookie("session")
-        return check_auth(token)
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-
-        # API endpoints
-        if path == "/api/phones":
-            if not self._is_authenticated():
-                self._send_json({"error": "unauthorized"}, 401)
-                return
-            phones = get_connected_phones()
-            self._send_json({"phones": phones})
-            return
-
-        if path.startswith("/api/phone/") and path.endswith("/log"):
-            if not self._is_authenticated():
-                self._send_json({"error": "unauthorized"}, 401)
-                return
-            phone_id = path.split("/")[3]
-            log = get_tunnel_log(phone_id)
-            self._send_json({"log": log})
-            return
-
-        # Login page
-        if path == "/login":
-            self._send_html(LOGIN_PAGE)
-            return
-
-        # Main dashboard (requires auth)
-        if path == "/" or path == "/dashboard":
-            if not self._is_authenticated():
-                self._redirect("/login")
-                return
-            self._send_html(DASHBOARD_PAGE)
-            return
-
-        # 404
-        self.send_response(404)
-        self.end_headers()
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode()
-
-        if path == "/api/login":
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                params = parse_qs(body)
-                data = {k: v[0] for k, v in params.items()}
-
-            password = data.get("password", "")
-            if password == ADMIN_PASS:
-                token = create_session()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header(
-                    "Set-Cookie",
-                    f"session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+    if phone_id:
+        try:
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO command_log (phone_id, command, output, exit_code) VALUES (%s,%s,%s,%s)",
+                    (phone_id, command, (out["output"] + out["error"])[:5000], out["code"]),
                 )
-                self.end_headers()
-                self.wfile.write(json.dumps({"success": True}).encode())
-            else:
-                self._send_json({"success": False, "error": "Invalid password"}, 401)
-            return
-
-        if path == "/api/logout":
-            token = self._get_cookie("session")
-            if token in sessions:
-                del sessions[token]
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header(
-                "Set-Cookie", "session=; Path=/; HttpOnly; Max-Age=0"
-            )
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True}).encode())
-            return
-
-        if path == "/api/command":
-            if not self._is_authenticated():
-                self._send_json({"error": "unauthorized"}, 401)
-                return
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                self._send_json({"error": "invalid json"}, 400)
-                return
-            port = data.get("port")
-            user = data.get("user")
-            cmd = data.get("command", "")
-
-            # Security: block dangerous commands
-            blocked = ["rm -rf /", "mkfs", "dd if=", ":(){:|:&};:", "fork bomb"]
-            for b in blocked:
-                if b in cmd.lower():
-                    self._send_json(
-                        {"error": "Command blocked for safety"}, 403
-                    )
-                    return
-
-            if port and user and cmd:
-                result = run_phone_command(port, user, cmd)
-                self._send_json(result)
-            else:
-                self._send_json({"error": "Missing port, user, or command"}, 400)
-            return
-
-        # === Invite: Create (admin only) ===
-        if path == "/api/invite":
-            if not self._is_authenticated():
-                self._send_json({"error": "unauthorized"}, 401)
-                return
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                data = {}
-            port = data.get("port", 2222)
-            token = create_invite(port)
-            self._send_json({
-                "success": True,
-                "token": token,
-                "install_command": f'PHONE_PASS=SETPASSWORD TOKEN={token} curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh | bash',
-            })
-            return
-
-        # === Invite: List (admin only) ===
-        if path == "/api/invites":
-            if not self._is_authenticated():
-                self._send_json({"error": "unauthorized"}, 401)
-                return
-            self._send_json({"invites": invite_tokens})
-            return
-
-        # === Register: Phone uses invite token (no auth needed) ===
-        if path == "/api/register":
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                self._send_json({"error": "invalid json"}, 400)
-                return
-            token = data.get("token", "")
-            public_key = data.get("public_key", "")
-            user = data.get("user", "")
-            tunnel_port = data.get("tunnel_port", 2222)
-
-            if not token or not public_key:
-                self._send_json({"error": "Missing token or public_key"}, 400)
-                return
-
-            success, message = use_invite(token, public_key, user, tunnel_port)
-            if success:
-                self._send_json({"success": True, "message": message})
-            else:
-                self._send_json({"success": False, "error": message}, 403)
-            return
-
-        self.send_response(404)
-        self.end_headers()
+            conn.close()
+        except Exception:
+            pass
+    return out
 
 
-# ===== HTML PAGES =====
+# ───────────────────────── SETTINGS HELPERS ─────────────────────────
 
-LOGIN_PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Termux Dashboard - Login</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-       background: #0f172a; color: #e2e8f0; display: flex; justify-content: center;
-       align-items: center; min-height: 100vh; }
-.login-box { background: #1e293b; padding: 2rem; border-radius: 12px; width: 380px;
-             box-shadow: 0 25px 50px rgba(0,0,0,0.5); }
-h1 { text-align: center; margin-bottom: 0.5rem; font-size: 1.5rem; }
-.subtitle { text-align: center; color: #64748b; margin-bottom: 1.5rem; font-size: 0.9rem; }
-input { width: 100%; padding: 12px 16px; border: 1px solid #334155; border-radius: 8px;
-        background: #0f172a; color: #e2e8f0; font-size: 1rem; margin-bottom: 1rem; }
-input:focus { outline: none; border-color: #3b82f6; }
-button { width: 100%; padding: 12px; background: #3b82f6; color: white; border: none;
-         border-radius: 8px; font-size: 1rem; cursor: pointer; font-weight: 600; }
-button:hover { background: #2563eb; }
-.error { color: #ef4444; text-align: center; margin-top: 0.5rem; display: none; font-size: 0.9rem; }
-.logo { text-align: center; font-size: 2.5rem; margin-bottom: 0.5rem; }
-</style>
-</head>
-<body>
-<div class="login-box">
-  <div class="logo">📱</div>
-  <h1>Termux Dashboard</h1>
-  <p class="subtitle">Remote Phone Management</p>
-  <form id="loginForm">
-    <input type="password" id="password" placeholder="Dashboard password" autofocus required>
-    <button type="submit">Sign In</button>
-    <p class="error" id="error">Invalid password</p>
-  </form>
-</div>
-<script>
-document.getElementById('loginForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const pass = document.getElementById('password').value;
-  const res = await fetch('/api/login', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({password: pass})
-  });
-  const data = await res.json();
-  if (data.success) {
-    window.location.href = '/dashboard';
-  } else {
-    document.getElementById('error').style.display = 'block';
-  }
-});
-</script>
-</body>
-</html>"""
-
-DASHBOARD_PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Termux Dashboard</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-       background: #0f172a; color: #e2e8f0; min-height: 100vh; }
-
-/* Header */
-.header { background: #1e293b; padding: 1rem 2rem; display: flex; justify-content: space-between;
-          align-items: center; border-bottom: 1px solid #334155; }
-.header h1 { font-size: 1.3rem; display: flex; align-items: center; gap: 0.5rem; }
-.header-actions { display: flex; gap: 1rem; align-items: center; }
-.btn { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 0.85rem;
-       font-weight: 500; transition: all 0.2s; }
-.btn-primary { background: #3b82f6; color: white; }
-.btn-primary:hover { background: #2563eb; }
-.btn-danger { background: #334155; color: #94a3b8; }
-.btn-danger:hover { background: #ef4444; color: white; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.status-connected { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
-.status-stale { background: #eab308; box-shadow: 0 0 6px #eab308; }
-.status-unknown { background: #64748b; }
-.last-update { color: #64748b; font-size: 0.8rem; }
-
-/* Main Layout */
-.container { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
-
-/* Stats Bar */
-.stats-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-             gap: 1rem; margin-bottom: 1.5rem; }
-.stat-card { background: #1e293b; padding: 1rem 1.25rem; border-radius: 10px;
-             border: 1px solid #334155; }
-.stat-label { color: #64748b; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
-.stat-value { font-size: 1.8rem; font-weight: 700; margin-top: 0.25rem; }
-.stat-sub { color: #64748b; font-size: 0.8rem; margin-top: 0.25rem; }
-
-/* Phone Cards */
-.phones-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-               gap: 1.25rem; margin-bottom: 1.5rem; }
-.phone-card { background: #1e293b; border-radius: 12px; border: 1px solid #334155;
-              overflow: hidden; transition: border-color 0.2s; }
-.phone-card:hover { border-color: #3b82f6; }
-.phone-header { padding: 1rem 1.25rem; display: flex; justify-content: space-between;
-                align-items: center; border-bottom: 1px solid #334155; }
-.phone-name { font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
-.phone-body { padding: 1.25rem; }
-.phone-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
-.phone-stat { display: flex; flex-direction: column; }
-.phone-stat-label { color: #64748b; font-size: 0.75rem; text-transform: uppercase; }
-.phone-stat-value { font-size: 1.1rem; font-weight: 600; }
-
-/* Progress bars */
-.progress-bar { height: 6px; background: #334155; border-radius: 3px; margin-top: 4px; overflow: hidden; }
-.progress-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
-.progress-green { background: #22c55e; }
-.progress-yellow { background: #eab308; }
-.progress-red { background: #ef4444; }
-
-/* Connection info */
-.conn-info { background: #0f172a; border-radius: 8px; padding: 0.75rem 1rem; margin-top: 1rem;
-             font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem; color: #94a3b8; }
-.conn-info code { color: #22d3ee; }
-
-/* Phone actions */
-.phone-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
-.btn-sm { padding: 6px 12px; font-size: 0.8rem; border-radius: 5px; }
-
-/* Terminal / Command Section */
-.terminal-section { background: #1e293b; border-radius: 12px; border: 1px solid #334155;
-                    overflow: hidden; }
-.terminal-header { padding: 0.75rem 1.25rem; background: #0f172a; display: flex;
-                   justify-content: space-between; align-items: center; }
-.terminal-header h3 { font-size: 0.9rem; color: #94a3b8; }
-.terminal-body { padding: 1.25rem; }
-.cmd-row { display: flex; gap: 0.75rem; margin-bottom: 0.75rem; }
-.cmd-row select, .cmd-row input { padding: 8px 12px; border: 1px solid #334155; border-radius: 6px;
-                                   background: #0f172a; color: #e2e8f0; font-size: 0.9rem; }
-.cmd-row select { width: 200px; }
-.cmd-row input { flex: 1; font-family: 'SF Mono', 'Fira Code', monospace; }
-.cmd-output { background: #0f172a; border-radius: 8px; padding: 1rem; font-family: 'SF Mono', 'Fira Code', monospace;
-              font-size: 0.8rem; color: #a5f3fc; min-height: 100px; max-height: 300px;
-              overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-
-/* Quick commands */
-.quick-cmds { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; }
-.quick-cmd { padding: 4px 10px; background: #334155; border: none; border-radius: 4px;
-             color: #94a3b8; font-size: 0.75rem; cursor: pointer; }
-.quick-cmd:hover { background: #475569; color: #e2e8f0; }
-
-/* Responsive */
-@media (max-width: 768px) {
-  .phones-grid { grid-template-columns: 1fr; }
-  .stats-bar { grid-template-columns: repeat(2, 1fr); }
-  .container { padding: 1rem; }
-  .cmd-row { flex-direction: column; }
-  .cmd-row select { width: 100%; }
-}
-</style>
-</head>
-<body>
-
-<div class="header">
-  <h1>📱 Termux Dashboard</h1>
-  <div class="header-actions">
-    <span class="last-update" id="lastUpdate">Updating...</span>
-    <button class="btn btn-primary" onclick="refreshData()">↻ Refresh</button>
-    <button class="btn btn-primary" onclick="showInviteModal()">+ Invite Phone</button>
-    <button class="btn btn-danger" onclick="logout()">Logout</button>
-  </div>
-</div>
-
-<div class="container">
-  <!-- Stats Bar -->
-  <div class="stats-bar" id="statsBar">
-    <div class="stat-card">
-      <div class="stat-label">Connected Phones</div>
-      <div class="stat-value" id="totalPhones">-</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Active Tunnels</div>
-      <div class="stat-value" id="activeTunnels" style="color:#22c55e">-</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">VPS IP</div>
-      <div class="stat-value" style="font-size:1.2rem" id="vpsIp">-</div>
-      <div class="stat-sub">Port Range: 2222-2230</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Uptime</div>
-      <div class="stat-value" style="font-size:1.2rem" id="uptime">-</div>
-    </div>
-  </div>
-
-  <!-- Phone Cards -->
-  <div class="phones-grid" id="phonesGrid">
-    <div class="phone-card" style="display:flex;justify-content:center;align-items:center;padding:3rem;color:#64748b;">
-      Loading phones...
-    </div>
-  </div>
-
-  <!-- Terminal -->
-  <div class="terminal-section">
-    <div class="terminal-header">
-      <h3>⌨️ Remote Terminal</h3>
-      <span style="color:#64748b;font-size:0.8rem">Run commands on connected phones</span>
-    </div>
-    <div class="terminal-body">
-      <div class="quick-cmds">
-        <button class="quick-cmd" onclick="quickCmd('whoami && uname -a')">System Info</button>
-        <button class="quick-cmd" onclick="quickCmd('cat /sys/class/power_supply/battery/capacity && echo % && cat /sys/class/power_supply/battery/status')">Battery</button>
-        <button class="quick-cmd" onclick="quickCmd('df -h /sdcard')">Storage</button>
-        <button class="quick-cmd" onclick="quickCmd('free -h')">Memory</button>
-        <button class="quick-cmd" onclick="quickCmd('ls /sdcard/DCIM/Camera/ | tail -10')">Recent Photos</button>
-        <button class="quick-cmd" onclick="quickCmd('ls /sdcard/Download/ | tail -10')">Downloads</button>
-        <button class="quick-cmd" onclick="quickCmd('ps aux | head -20')">Processes</button>
-        <button class="quick-cmd" onclick="quickCmd('tmux ls')">Tmux Sessions</button>
-        <button class="quick-cmd" onclick="quickCmd('cat ~/tunnel.log | tail -10')">Tunnel Log</button>
-        <button class="quick-cmd" onclick="quickCmd('ip addr show | grep inet')">IP Address</button>
-      </div>
-      <div class="cmd-row">
-        <select id="cmdPhone"></select>
-        <input type="text" id="cmdInput" placeholder="Enter command..." onkeydown="if(event.key==='Enter')runCmd()">
-        <button class="btn btn-primary" onclick="runCmd()">Run</button>
-      </div>
-      <div class="cmd-output" id="cmdOutput">Ready. Select a phone and enter a command.</div>
-    </div>
-  </div>
-</div>
-
-<script>
-let phonesData = [];
-let autoRefresh = null;
-
-async function refreshData() {
-  try {
-    const res = await fetch('/api/phones');
-    if (res.status === 401) { window.location.href = '/login'; return; }
-    const data = await res.json();
-    phonesData = data.phones || [];
-    renderPhones();
-    renderStats();
-    document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
-  } catch (e) {
-    console.error('Refresh failed:', e);
-  }
-}
-
-function renderStats() {
-  const total = phonesData.length;
-  const active = phonesData.filter(p => p.status === 'connected' || p.status === 'active').length;
-  document.getElementById('totalPhones').textContent = total;
-  document.getElementById('activeTunnels').textContent = active;
-  document.getElementById('vpsIp').textContent = window.location.hostname;
-
-  // Update phone selector
-  const sel = document.getElementById('cmdPhone');
-  sel.innerHTML = '';
-  phonesData.forEach(p => {
-    const opt = document.createElement('option');
-    opt.value = JSON.stringify({port: p.tunnel_port, user: p.user});
-    opt.textContent = p.name + ' (:' + p.tunnel_port + ')';
-    sel.appendChild(opt);
-  });
-}
-
-function renderPhones() {
-  const grid = document.getElementById('phonesGrid');
-  if (phonesData.length === 0) {
-    grid.innerHTML = '<div class="phone-card" style="display:flex;justify-content:center;align-items:center;padding:3rem;color:#64748b;">No phones connected. Run install.sh on a phone to get started.</div>';
-    return;
-  }
-
-  grid.innerHTML = phonesData.map(phone => {
-    const s = phone.stats || {};
-    const statusClass = phone.status === 'connected' ? 'status-connected' : phone.status === 'active' ? 'status-connected' : phone.status === 'stale' ? 'status-stale' : 'status-unknown';
-    const statusText = phone.status === 'connected' ? 'Connected' : phone.status === 'active' ? 'Active' : phone.status === 'stale' ? 'Stale' : 'Unknown';
-
-    // Parse stats
-    const battery = s.BAT || 'N/A';
-    const batNum = parseInt(battery) || 0;
-    const memory = s.MEM || 'N/A';
-    const memNum = parseInt(memory) || 0;
-    const storage = s.STORAGE || 'N/A';
-    const storNum = parseInt(storage) || 0;
-    const tunnel = s.TUNNEL || 'N/A';
-    const procs = s.PROCS || 'N/A';
-
-    const batColor = batNum > 50 ? 'progress-green' : batNum > 20 ? 'progress-yellow' : 'progress-red';
-    const memColor = memNum < 60 ? 'progress-green' : memNum < 85 ? 'progress-yellow' : 'progress-red';
-    const storColor = storNum < 70 ? 'progress-green' : storNum < 90 ? 'progress-yellow' : 'progress-red';
-
-    return `
-    <div class="phone-card">
-      <div class="phone-header">
-        <div class="phone-name">
-          <span class="status-dot ${statusClass}"></span>
-          ${phone.name}
-        </div>
-        <span style="color:#64748b;font-size:0.8rem">${statusText}${phone.last_seen ? ' • ' + phone.last_seen : ''}</span>
-      </div>
-      <div class="phone-body">
-        <div class="phone-stats">
-          <div class="phone-stat">
-            <span class="phone-stat-label">🔋 Battery</span>
-            <span class="phone-stat-value">${battery}</span>
-            <div class="progress-bar"><div class="progress-fill ${batColor}" style="width:${batNum}%"></div></div>
-          </div>
-          <div class="phone-stat">
-            <span class="phone-stat-label">💾 Memory</span>
-            <span class="phone-stat-value">${memory}</span>
-            <div class="progress-bar"><div class="progress-fill ${memColor}" style="width:${memNum}%"></div></div>
-          </div>
-          <div class="phone-stat">
-            <span class="phone-stat-label">📦 Storage</span>
-            <span class="phone-stat-value">${storage}</span>
-            <div class="progress-bar"><div class="progress-fill ${storColor}" style="width:${storNum}%"></div></div>
-          </div>
-          <div class="phone-stat">
-            <span class="phone-stat-label">🔗 Tunnel</span>
-            <span class="phone-stat-value" style="color:${tunnel==='ACTIVE'?'#22c55e':'#ef4444'}">${tunnel}</span>
-          </div>
-          <div class="phone-stat">
-            <span class="phone-stat-label">⚙️ Processes</span>
-            <span class="phone-stat-value">${procs}</span>
-          </div>
-          <div class="phone-stat">
-            <span class="phone-stat-label">🌐 Port</span>
-            <span class="phone-stat-value">${phone.tunnel_port || 'N/A'}</span>
-          </div>
-        </div>
-        <div class="conn-info">
-          SSH: <code>ssh -p ${phone.tunnel_port} ${phone.user}@${window.location.hostname}</code><br>
-          SFTP: <code>${window.location.hostname}:${phone.tunnel_port}</code> (user: ${phone.user})
-        </div>
-        <div class="phone-actions">
-          <button class="btn btn-primary btn-sm" onclick="quickCmdPhone(${phone.tunnel_port},'${phone.user}','bash ~/termux-setup/scripts/monitor.sh --once')">📊 Monitor</button>
-          <button class="btn btn-sm" style="background:#334155;color:#94a3b8" onclick="quickCmdPhone(${phone.tunnel_port},'${phone.user}','ls /sdcard/DCIM/Camera/ | wc -l')">📷 Photo Count</button>
-          <button class="btn btn-sm" style="background:#334155;color:#94a3b8" onclick="quickCmdPhone(${phone.tunnel_port},'${phone.user}','tail -5 ~/tunnel.log')">📝 Tunnel Log</button>
-        </div>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-async function runCmd() {
-  const sel = document.getElementById('cmdPhone');
-  const input = document.getElementById('cmdInput');
-  const output = document.getElementById('cmdOutput');
-  if (!sel.value || !input.value) return;
-
-  const {port, user} = JSON.parse(sel.value);
-  output.textContent = '$ ' + input.value + '\\nRunning...';
-
-  try {
-    const res = await fetch('/api/command', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({port, user, command: input.value})
-    });
-    const data = await res.json();
-    if (data.error && res.status !== 200) {
-      output.textContent = '$ ' + input.value + '\\n\\n❌ Error: ' + data.error;
-    } else {
-      output.textContent = '$ ' + input.value + '\\n\\n' + (data.output || '') + (data.error ? '\\n⚠ ' + data.error : '');
-    }
-  } catch (e) {
-    output.textContent = '$ ' + input.value + '\\n\\n❌ Network error: ' + e.message;
-  }
-}
-
-function quickCmd(cmd) {
-  document.getElementById('cmdInput').value = cmd;
-  runCmd();
-}
-
-function quickCmdPhone(port, user, cmd) {
-  // Select the right phone in dropdown
-  const sel = document.getElementById('cmdPhone');
-  for (let opt of sel.options) {
-    const val = JSON.parse(opt.value);
-    if (val.port === port) { sel.value = opt.value; break; }
-  }
-  document.getElementById('cmdInput').value = cmd;
-  runCmd();
-}
-
-async function logout() {
-  await fetch('/api/logout', {method: 'POST'});
-  window.location.href = '/login';
-}
-
-// ===== INVITE SYSTEM =====
-function showInviteModal() {
-  // Create modal overlay
-  let modal = document.getElementById('inviteModal');
-  if (modal) modal.remove();
-
-  modal = document.createElement('div');
-  modal.id = 'inviteModal';
-  modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;justify-content:center;align-items:center;z-index:1000;';
-  modal.innerHTML = `
-    <div style="background:#1e293b;padding:2rem;border-radius:12px;width:500px;max-width:90vw;border:1px solid #334155;">
-      <h2 style="margin-bottom:1rem;font-size:1.2rem;">📲 Invite New Phone</h2>
-      <p style="color:#94a3b8;font-size:0.9rem;margin-bottom:1rem;">Generate an invite code for a family member's phone. They won't need the VPS password.</p>
-      <div style="margin-bottom:1rem;">
-        <label style="color:#94a3b8;font-size:0.85rem;">Tunnel Port</label>
-        <input type="number" id="invitePort" value="2223" min="2222" max="2230"
-               style="width:100%;padding:10px;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:1rem;margin-top:4px;">
-        <span style="color:#64748b;font-size:0.75rem;">Use 2222 for first phone, 2223 for second, etc.</span>
-      </div>
-      <button class="btn btn-primary" style="width:100%;padding:12px;margin-bottom:1rem;" onclick="generateInvite()">Generate Invite Code</button>
-      <div id="inviteResult" style="display:none;">
-        <div style="background:#0f172a;padding:1rem;border-radius:8px;margin-bottom:0.75rem;">
-          <label style="color:#94a3b8;font-size:0.75rem;text-transform:uppercase;">Install Command (copy & paste on phone)</label>
-          <div id="inviteCmd" style="font-family:monospace;font-size:0.8rem;color:#22d3ee;margin-top:0.5rem;word-break:break-all;user-select:all;"></div>
-        </div>
-        <button class="btn" style="width:100%;background:#334155;color:#94a3b8;" onclick="copyInvite()">📋 Copy Command</button>
-      </div>
-      <div id="inviteList" style="margin-top:1rem;"></div>
-      <button class="btn" style="width:100%;background:#334155;color:#94a3b8;margin-top:1rem;" onclick="document.getElementById('inviteModal').remove()">Close</button>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
-  loadInvites();
-}
-
-async function generateInvite() {
-  const port = document.getElementById('invitePort').value;
-  const res = await fetch('/api/invite', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({port: parseInt(port)})
-  });
-  const data = await res.json();
-  if (data.success) {
-    document.getElementById('inviteResult').style.display = 'block';
-    document.getElementById('inviteCmd').textContent = data.install_command;
-    loadInvites();
-  }
-}
-
-function copyInvite() {
-  const cmd = document.getElementById('inviteCmd').textContent;
-  navigator.clipboard.writeText(cmd).catch(() => {
-    // Fallback
-    const ta = document.createElement('textarea');
-    ta.value = cmd; document.body.appendChild(ta); ta.select();
-    document.execCommand('copy'); document.body.removeChild(ta);
-  });
-}
-
-async function loadInvites() {
-  const res = await fetch('/api/invites', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-  const data = await res.json();
-  const list = document.getElementById('inviteList');
-  if (!list) return;
-  const invites = data.invites || {};
-  const keys = Object.keys(invites);
-  if (keys.length === 0) { list.innerHTML = '<p style="color:#64748b;font-size:0.8rem;">No invites yet.</p>'; return; }
-  list.innerHTML = '<p style="color:#94a3b8;font-size:0.85rem;margin-bottom:0.5rem;">Previous Invites:</p>' +
-    keys.map(k => {
-      const inv = invites[k];
-      const badge = inv.used ? '<span style="color:#22c55e;">✓ Used</span>' : '<span style="color:#eab308;">⏳ Pending</span>';
-      return `<div style="background:#0f172a;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.25rem;font-size:0.8rem;display:flex;justify-content:space-between;">
-        <span style="color:#64748b;">Port ${inv.port} • ${k.substring(0,8)}...</span> ${badge}
-      </div>`;
-    }).join('');
-}
-
-// Initial load
-refreshData();
-// Auto-refresh every 30 seconds
-autoRefresh = setInterval(refreshData, 30000);
-</script>
-</body>
-</html>"""
+def read_env_file():
+    cfg = {}
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    return cfg
 
 
-def main():
-    print(f"╔══════════════════════════════════════════════╗")
-    print(f"║  📱 Termux Dashboard                         ║")
-    print(f"║  Running on http://{HOST}:{PORT}              ║")
-    print(f"║  Log dir: {LOG_DIR}                           ║")
-    print(f"╚══════════════════════════════════════════════╝")
+def update_env_value(key, value):
+    lines = []
+    found = False
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r") as f:
+            lines = f.readlines()
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            new_lines.append(f"{key}={value}\n")
+            found = True
+        else:
+            new_lines.append(line)
+    if not found:
+        new_lines.append(f"{key}={value}\n")
+    with open(ENV_FILE, "w") as f:
+        f.writelines(new_lines)
 
-    server = HTTPServer((HOST, PORT), DashboardHandler)
+
+def get_system_info():
+    info = {}
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down dashboard...")
-        server.shutdown()
+        info["uptime"] = subprocess.run(["uptime", "-p"], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        info["uptime"] = "N/A"
+    try:
+        info["hostname"] = subprocess.run(["hostname"], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        info["hostname"] = "N/A"
+    try:
+        r = subprocess.run(["free", "-h"], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.splitlines():
+            if line.startswith("Mem:"):
+                parts = line.split()
+                info["mem_total"] = parts[1] if len(parts) > 1 else "N/A"
+                info["mem_used"] = parts[2] if len(parts) > 2 else "N/A"
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=5)
+        lines = r.stdout.strip().splitlines()
+        if len(lines) > 1:
+            parts = lines[1].split()
+            info["disk_total"] = parts[1] if len(parts) > 1 else "N/A"
+            info["disk_used"] = parts[2] if len(parts) > 2 else "N/A"
+            info["disk_pct"] = parts[4] if len(parts) > 4 else "N/A"
+    except Exception:
+        pass
+    return info
 
+
+# ═══════════════════════════════════════════════════════════
+#                         ROUTES — PAGES
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/")
+def index():
+    if not session.get("authenticated"):
+        return redirect(url_for("login_page"))
+    return redirect(url_for("dashboard_page"))
+
+
+@app.route("/login")
+def login_page():
+    return render_template("login.html")
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard_page():
+    return render_template("dashboard.html")
+
+
+@app.route("/terminal")
+@login_required
+def terminal_page():
+    return render_template("terminal.html")
+
+
+@app.route("/invites")
+@login_required
+def invites_page():
+    return render_template("invites.html")
+
+
+@app.route("/settings")
+@login_required
+def settings_page():
+    return render_template("settings.html")
+
+
+@app.route("/logs")
+@login_required
+def logs_page():
+    return render_template("logs.html")
+
+
+# ═══════════════════════════════════════════════════════════
+#                         ROUTES — API
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json(silent=True) or {}
+    if data.get("password") == ADMIN_PASS:
+        session["authenticated"] = True
+        session.permanent = True
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Invalid password"}), 401
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"success": True})
+
+
+@app.route("/api/phones")
+@login_required
+def api_phones():
+    return jsonify({"phones": get_connected_phones()})
+
+
+@app.route("/api/system")
+@login_required
+def api_system():
+    return jsonify(get_system_info())
+
+
+@app.route("/api/command", methods=["POST"])
+@login_required
+def api_command():
+    data = request.get_json(silent=True) or {}
+    port = data.get("port")
+    user = data.get("user")
+    cmd = data.get("command", "")
+
+    blocked = ["rm -rf /", "mkfs", "dd if=", ":(){:|:&};:", "fork bomb"]
+    for b in blocked:
+        if b in cmd.lower():
+            return jsonify({"error": "Command blocked for safety"}), 403
+
+    if not (port and user and cmd):
+        return jsonify({"error": "Missing port, user, or command"}), 400
+
+    phone_id = f"phone-{user}"
+    # Look up SSH password for this phone
+    ssh_password = None
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT ssh_password FROM phones WHERE user=%s LIMIT 1", (user,))
+            row = cur.fetchone()
+            if row and row["ssh_password"]:
+                ssh_password = row["ssh_password"]
+        conn.close()
+    except Exception:
+        pass
+    return jsonify(run_phone_command(port, user, cmd, phone_id=phone_id, ssh_password=ssh_password))
+
+
+@app.route("/api/invite", methods=["POST"])
+@login_required
+def api_invite():
+    data = request.get_json(silent=True) or {}
+    port = data.get("port", 2222)
+    token = create_invite(port)
+    return jsonify({
+        "success": True, "token": token,
+        "install_command": f"PHONE_PASS=SETPASSWORD TOKEN={token} curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh | bash",
+    })
+
+
+@app.route("/api/invites")
+@login_required
+def api_invites():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM invites ORDER BY created_at DESC")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    invites = []
+    for r in rows:
+        invites.append({
+            "token": r["token"], "port": r["tunnel_port"],
+            "used": bool(r["used"]), "used_by": r["used_by"],
+            "created": r["created_at"].strftime("%Y-%m-%d %H:%M:%S") if r["created_at"] else "",
+            "used_at": r["used_at"].strftime("%Y-%m-%d %H:%M:%S") if r["used_at"] else None,
+        })
+    return jsonify({"invites": invites})
+
+
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    data = request.get_json(silent=True) or {}
+    token = data.get("token", "")
+    public_key = data.get("public_key", "")
+    user = data.get("user", "")
+    tunnel_port = data.get("tunnel_port", 2222)
+    if not token or not public_key:
+        return jsonify({"error": "Missing token or public_key"}), 400
+    ok, msg = use_invite(token, public_key, user, tunnel_port)
+    if ok:
+        return jsonify({"success": True, "message": msg})
+    return jsonify({"success": False, "error": msg}), 403
+
+
+@app.route("/api/stats", methods=["POST"])
+def api_stats():
+    data = request.get_json(silent=True) or {}
+    phone_id = data.get("phone_id", "")
+    if not phone_id:
+        return jsonify({"error": "Missing phone_id"}), 400
+    _save_phone_stats(phone_id, data)
+    return jsonify({"success": True})
+
+
+@app.route("/api/command-history")
+@login_required
+def api_command_history():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM command_log ORDER BY executed_at DESC LIMIT 50")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    logs = []
+    for r in rows:
+        logs.append({
+            "phone_id": r["phone_id"], "command": r["command"],
+            "output": (r["output"] or "")[:500], "exit_code": r["exit_code"],
+            "time": r["executed_at"].strftime("%Y-%m-%d %H:%M:%S") if r["executed_at"] else "",
+        })
+    return jsonify({"logs": logs})
+
+
+@app.route("/api/settings", methods=["GET"])
+@login_required
+def api_settings_get():
+    cfg = read_env_file()
+    safe = {}
+    for k, v in cfg.items():
+        if "PASS" in k or "SECRET" in k:
+            safe[k] = "********"
+        else:
+            safe[k] = v
+    return jsonify({"settings": safe})
+
+
+@app.route("/api/settings/password", methods=["POST"])
+@login_required
+def api_change_password():
+    global ADMIN_PASS
+    data = request.get_json(silent=True) or {}
+    current = data.get("current", "")
+    new_pass = data.get("new_password", "")
+    if current != ADMIN_PASS:
+        return jsonify({"error": "Current password incorrect"}), 403
+    if len(new_pass) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    update_env_value("DASH_PASS", new_pass)
+    ADMIN_PASS = new_pass
+    return jsonify({"success": True, "message": "Password updated"})
+
+
+# ───────────────────────── PHONE CONFIG API ─────────────────────────
+
+def _get_phone_ssh(phone_id):
+    """Return (port, user, ssh_password) for a phone by phone_id."""
+    phones = get_connected_phones()
+    phone = next((p for p in phones if p["id"] == phone_id), None)
+    if not phone:
+        return None, None, None
+    port = phone.get("tunnel_port", 2222)
+    user = phone.get("user", "")
+    pw = phone.get("ssh_password") or ""
+    if not pw:
+        try:
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT ssh_password FROM phones WHERE phone_id=%s OR user=%s LIMIT 1", (phone_id, user))
+                row = cur.fetchone()
+                if row and row["ssh_password"]:
+                    pw = row["ssh_password"]
+            conn.close()
+        except Exception:
+            pass
+    return port, user, pw
+
+@app.route("/api/phone/<phone_id>/config", methods=["GET"])
+@login_required
+def api_phone_config_get(phone_id):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM phones WHERE phone_id=%s", (phone_id,))
+            phone = cur.fetchone()
+        if not phone:
+            return jsonify({"error": "Phone not found"}), 404
+        return jsonify({
+            "phone_id": phone["phone_id"],
+            "name": phone["name"],
+            "user": phone["user"],
+            "tunnel_port": phone["tunnel_port"],
+            "ssh_password": phone["ssh_password"] or "",
+            "status": phone["status"],
+        })
+    finally:
+        conn.close()
+
+
+@app.route("/api/phone/<phone_id>/config", methods=["POST"])
+@login_required
+def api_phone_config_update(phone_id):
+    data = request.get_json(silent=True) or {}
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            # Check if phone exists in DB
+            cur.execute("SELECT phone_id FROM phones WHERE phone_id=%s", (phone_id,))
+            exists = cur.fetchone()
+
+            if exists:
+                updates = []
+                params = []
+                if "name" in data:
+                    updates.append("name=%s")
+                    params.append(data["name"])
+                if "ssh_password" in data:
+                    updates.append("ssh_password=%s")
+                    params.append(data["ssh_password"])
+                if not updates:
+                    return jsonify({"error": "Nothing to update"}), 400
+                params.append(phone_id)
+                cur.execute(
+                    f"UPDATE phones SET {','.join(updates)} WHERE phone_id=%s",
+                    params,
+                )
+            else:
+                # Insert new phone record (discovered via log dir / ss)
+                user = phone_id.split("-", 1)[1] if "-" in phone_id else phone_id
+                cur.execute(
+                    """INSERT INTO phones (phone_id, name, user, tunnel_port, status, ssh_password)
+                       VALUES (%s, %s, %s, %s, 'connected', %s)""",
+                    (phone_id, data.get("name", phone_id), user, 2222,
+                     data.get("ssh_password", "")),
+                )
+        return jsonify({"success": True})
+    finally:
+        conn.close()
+
+
+# ───────────────────────── FILE BROWSER API ─────────────────────────
+
+@app.route("/api/phone/<phone_id>/files")
+@login_required
+def api_phone_files(phone_id):
+    path = request.args.get("path", "/sdcard")
+    # Sanitize path — no shell injection
+    if not re.match(r'^[a-zA-Z0-9_/.\-~ ]+$', path):
+        return jsonify({"error": "Invalid path"}), 400
+
+    port, user, pw = _get_phone_ssh(phone_id)
+    if not port:
+        return jsonify({"error": "Phone not found"}), 404
+
+    cmd = f'ls -la --time-style=long-iso "{path}" 2>&1; echo "___EXIT:$?"'
+    result = run_phone_command(port, user, cmd, ssh_password=pw)
+    raw = result.get("output", "") + result.get("error", "")
+
+    files = []
+    for line in raw.splitlines():
+        if line.startswith("___EXIT:"):
+            continue
+        if line.startswith("total ") or not line.strip():
+            continue
+        parts = line.split(None, 7)
+        if len(parts) < 8:
+            continue
+        perms = parts[0]
+        size_str = parts[4]
+        date_str = parts[5]
+        time_str = parts[6]
+        name = parts[7]
+        if name in (".", ".."):
+            continue
+        is_dir = perms.startswith("d")
+        is_link = perms.startswith("l")
+        if is_link and " -> " in name:
+            name = name.split(" -> ")[0]
+        try:
+            size = int(size_str)
+        except ValueError:
+            size = 0
+        files.append({
+            "name": name,
+            "is_dir": is_dir,
+            "is_link": is_link,
+            "perms": perms,
+            "size": size,
+            "date": f"{date_str} {time_str}",
+        })
+
+    # Sort: dirs first, then files
+    files.sort(key=lambda f: (not f["is_dir"], f["name"].lower()))
+    return jsonify({"path": path, "files": files})
+
+
+@app.route("/api/phone/<phone_id>/download")
+@login_required
+def api_phone_download(phone_id):
+    file_path = request.args.get("path", "")
+    if not file_path or not re.match(r'^[a-zA-Z0-9_/.\-~ ]+$', file_path):
+        return jsonify({"error": "Invalid path"}), 400
+
+    port, user, pw = _get_phone_ssh(phone_id)
+    if not port:
+        return jsonify({"error": "Phone not found"}), 404
+
+    tmp_dir = tempfile.mkdtemp(prefix="termux_dl_")
+    try:
+        fname = os.path.basename(file_path)
+        local_path = os.path.join(tmp_dir, fname)
+
+        scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                    "-P", str(port), f"{user}@localhost:{file_path}", local_path]
+        if pw:
+            scp_cmd = ["sshpass", "-p", pw] + scp_cmd
+
+        r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 or not os.path.exists(local_path):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return jsonify({"error": f"Download failed: {r.stderr.strip()}"}), 500
+
+        return send_file(local_path, as_attachment=True, download_name=fname)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "Download timed out"}), 504
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/phone/<phone_id>/download-zip", methods=["POST"])
+@login_required
+def api_phone_download_zip(phone_id):
+    data = request.get_json(silent=True) or {}
+    paths = data.get("paths", [])
+    if not paths:
+        return jsonify({"error": "No files selected"}), 400
+    # Validate all paths
+    for p in paths:
+        if not re.match(r'^[a-zA-Z0-9_/.\-~ ]+$', p):
+            return jsonify({"error": f"Invalid path: {p}"}), 400
+
+    port, user, pw = _get_phone_ssh(phone_id)
+    if not port:
+        return jsonify({"error": "Phone not found"}), 404
+
+    tmp_dir = tempfile.mkdtemp(prefix="termux_zip_")
+    try:
+        # Create tar.gz on the phone, then SCP it
+        remote_tmp = f"/data/data/com.termux/files/home/.download_tmp_{int(time.time())}.tar.gz"
+        quoted_paths = " ".join(f'"{p}"' for p in paths)
+        tar_cmd = f'tar czf "{remote_tmp}" {quoted_paths} 2>&1; echo "___EXIT:$?"'
+        result = run_phone_command(port, user, tar_cmd, ssh_password=pw)
+
+        local_zip = os.path.join(tmp_dir, "download.tar.gz")
+        scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                    "-P", str(port), f"{user}@localhost:{remote_tmp}", local_zip]
+        if pw:
+            scp_cmd = ["sshpass", "-p", pw] + scp_cmd
+
+        r = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=300)
+
+        # Cleanup remote temp file
+        run_phone_command(port, user, f'rm -f "{remote_tmp}"', ssh_password=pw)
+
+        if r.returncode != 0 or not os.path.exists(local_zip):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return jsonify({"error": f"Zip download failed: {r.stderr.strip()}"}), 500
+
+        return send_file(local_zip, as_attachment=True, download_name="phone_files.tar.gz")
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "Download timed out"}), 504
+    except Exception as e:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/phone/<phone_id>/sysinfo")
+@login_required
+def api_phone_sysinfo(phone_id):
+    port, user, pw = _get_phone_ssh(phone_id)
+    if not port:
+        return jsonify({"error": "Phone not found"}), 404
+
+    info_cmd = (
+        'echo "___USER:$(whoami)";'
+        'echo "___KERNEL:$(uname -sr)";'
+        'echo "___ARCH:$(uname -m)";'
+        'echo "___HOSTNAME:$(hostname 2>/dev/null || echo N/A)";'
+        'echo "___UPTIME:$(uptime -p 2>/dev/null || uptime)";'
+        'echo "___DATE:$(date)";'
+        'df -h /sdcard 2>/dev/null | tail -1 | awk \'{print "___STORAGE_TOTAL:"$2"\\n___STORAGE_USED:"$3"\\n___STORAGE_AVAIL:"$4"\\n___STORAGE_PCT:"$5}\';'
+        'free -h 2>/dev/null | grep Mem | awk \'{print "___MEM_TOTAL:"$2"\\n___MEM_USED:"$3"\\n___MEM_FREE:"$4}\';'
+        'echo "___PROCS:$(ps aux 2>/dev/null | wc -l)";'
+        'echo "___TERMUX_VER:$(cat /data/data/com.termux/files/usr/etc/termux-version 2>/dev/null || echo N/A)";'
+        'echo "___PKG_COUNT:$(dpkg -l 2>/dev/null | grep ^ii | wc -l)";'
+        'ls /sdcard/DCIM/Camera/ 2>/dev/null | wc -l | xargs -I{} echo "___PHOTOS:{}";'
+        'du -sh /sdcard/DCIM/Camera/ 2>/dev/null | awk \'{print "___PHOTOS_SIZE:"$1}\';'
+        'echo "___SHELL:$SHELL";'
+    )
+    result = run_phone_command(port, user, info_cmd, ssh_password=pw)
+    raw = result.get("output", "")
+
+    info = {}
+    for line in raw.splitlines():
+        if line.startswith("___") and ":" in line:
+            key, val = line.split(":", 1)
+            info[key.lstrip("_")] = val.strip()
+
+    return jsonify(info)
+
+
+# ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    main()
+    print("\033[32m")
+    print("  ╔══════════════════════════════════════════╗")
+    print("  ║  ▓▓▓ TERMUX DASHBOARD ▓▓▓               ║")
+    print("  ║  Listening on 0.0.0.0:8080               ║")
+    print("  ║  Theme: CYBERTERM v2.0                   ║")
+    print("  ╚══════════════════════════════════════════╝")
+    print("\033[0m")
+    app.run(host="0.0.0.0", port=int(os.environ.get("DASH_PORT", 8080)), debug=False)

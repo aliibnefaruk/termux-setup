@@ -1,59 +1,71 @@
 #!/bin/bash
 # ============================================================
-# Deploy Termux Dashboard to VPS
-# Run on VPS: bash deploy-dashboard.sh
-# Or from local: ssh root@VPS "bash -s" < deploy-dashboard.sh
+# Deploy Termux Dashboard (Flask + Gunicorn + MySQL)
+# Run on VPS: bash deploy.sh
 # ============================================================
-
 set -e
 
-DASH_PORT="${DASH_PORT:-8080}"
-DASH_PASS="${DASH_PASS:-admin}"
-INSTALL_DIR="/opt/termux-dashboard"
-SERVICE_NAME="termux-dashboard"
+DASH_DIR="/opt/termux-dashboard"
+LOG_DIR="/var/log/termux-remote"
 
-echo "╔══════════════════════════════════════════════╗"
-echo "║  📱 Deploying Termux Dashboard               ║"
-echo "╚══════════════════════════════════════════════╝"
+echo ""
+echo "  ╔════════════════════════════════════════════╗"
+echo "  ║  CYBERTERM Dashboard — Deploy              ║"
+echo "  ╚════════════════════════════════════════════╝"
+echo ""
 
-# Install Python3 if not present
-if ! command -v python3 &>/dev/null; then
-    echo "[>>] Installing Python3..."
-    apt-get update -qq
-    apt-get install -y python3 python3-pip -qq
-fi
+# Install dependencies
+echo "[>>] Installing system packages..."
+apt-get update -qq
+apt-get install -y python3 python3-pip sshpass -qq 2>/dev/null || true
 
-# Create install directory
-mkdir -p "$INSTALL_DIR"
+echo "[>>] Installing Python packages..."
+pip3 install flask pymysql gunicorn 2>/dev/null || pip install flask pymysql gunicorn
 
-# Copy dashboard app
-echo "[>>] Installing dashboard..."
-if [ -f "dashboard/app.py" ]; then
-    cp dashboard/app.py "$INSTALL_DIR/app.py"
-elif [ -f "/tmp/termux-dashboard-app.py" ]; then
-    cp /tmp/termux-dashboard-app.py "$INSTALL_DIR/app.py"
+# Create directories
+mkdir -p "$DASH_DIR" "$LOG_DIR"
+
+# Copy project files
+echo "[>>] Copying dashboard files..."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cp "$SCRIPT_DIR/app.py" "$DASH_DIR/app.py"
+cp "$SCRIPT_DIR/requirements.txt" "$DASH_DIR/requirements.txt" 2>/dev/null || true
+cp -r "$SCRIPT_DIR/static" "$DASH_DIR/" 2>/dev/null || true
+cp -r "$SCRIPT_DIR/templates" "$DASH_DIR/" 2>/dev/null || true
+
+chmod 755 "$LOG_DIR"
+
+# Create .env if not exists
+if [ ! -f "$DASH_DIR/.env" ]; then
+    SECRET=$(python3 -c "import secrets;print(secrets.token_hex(32))")
+    cat > "$DASH_DIR/.env" <<EOF
+DASH_PASS=changeme
+DASH_PORT=8080
+SECRET_KEY=${SECRET}
+DB_HOST=localhost
+DB_USER=termux
+DB_PASS=Termux@Dash2026!
+DB_NAME=termux_dashboard
+EOF
+    chmod 600 "$DASH_DIR/.env"
+    echo "[+] Created .env — CHANGE DASH_PASS!"
 else
-    echo "[!!] dashboard/app.py not found. Trying to download from GitHub..."
-    curl -sL "https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/dashboard/app.py" \
-        -o "$INSTALL_DIR/app.py"
+    echo "[*] .env exists, keeping current config"
 fi
-
-# Create log directory
-mkdir -p /var/log/termux-remote
-chmod 755 /var/log/termux-remote
 
 # Create systemd service
 echo "[>>] Creating systemd service..."
-cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
+cat > /etc/systemd/system/td.service <<EOF
 [Unit]
-Description=Termux Remote Dashboard
-After=network.target
+Description=CyberTerm Dashboard
+After=network.target mysql.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${INSTALL_DIR}/app.py
-Environment=DASH_PORT=${DASH_PORT}
-Environment=DASH_PASS=${DASH_PASS}
+User=root
+WorkingDirectory=$DASH_DIR
+EnvironmentFile=$DASH_DIR/.env
+ExecStart=/usr/local/bin/gunicorn -w 2 -b 0.0.0.0:8080 app:app --timeout 30
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -63,31 +75,22 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# Reload systemd and start
 systemctl daemon-reload
-systemctl enable ${SERVICE_NAME}
-systemctl restart ${SERVICE_NAME}
+systemctl enable td
+systemctl restart td
 
-# Open firewall
-if command -v ufw &>/dev/null; then
-    ufw allow ${DASH_PORT}/tcp 2>/dev/null || true
-fi
-
-# Check status
+# Wait and check
 sleep 2
-if systemctl is-active --quiet ${SERVICE_NAME}; then
+if systemctl is-active --quiet td; then
     VPS_IP=$(hostname -I | awk '{print $1}')
     echo ""
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║  ✅ Dashboard deployed!                      ║"
-    echo "║                                              ║"
-    echo "║  URL: http://${VPS_IP}:${DASH_PORT}          ║"
-    echo "║  Password: ${DASH_PASS}                      ║"
-    echo "║                                              ║"
-    echo "║  Service: systemctl status ${SERVICE_NAME}   ║"
-    echo "║  Logs: journalctl -u ${SERVICE_NAME} -f      ║"
-    echo "╚══════════════════════════════════════════════╝"
+    echo "  ╔════════════════════════════════════════════╗"
+    echo "  ║  [OK] Dashboard deployed!                  ║"
+    echo "  ║  URL: http://${VPS_IP}:8080                ║"
+    echo "  ║  Service: systemctl status td              ║"
+    echo "  ║  Logs: journalctl -u td -f                 ║"
+    echo "  ╚════════════════════════════════════════════╝"
 else
-    echo "[!!] Service failed to start. Check: journalctl -u ${SERVICE_NAME}"
-    systemctl status ${SERVICE_NAME}
+    echo "[!!] Service failed. Check: journalctl -u td -n 50"
+    systemctl status td --no-pager
 fi

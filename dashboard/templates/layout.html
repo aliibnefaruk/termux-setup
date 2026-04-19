@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="app-layout">
+
+  <!-- ══ SIDEBAR ══ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">╔═══════════════╗
+║  CYBERTERM    ║
+║  v2.0         ║
+╚═══════════════╝</div>
+      <div class="sidebar-version">Termux Remote Console</div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <div class="nav-section">// Monitoring</div>
+      <a href="/dashboard" class="nav-link">
+        <span class="nav-icon">📡</span>
+        Dashboard
+        <span class="nav-badge" id="phoneBadge">-</span>
+      </a>
+      <a href="/terminal" class="nav-link">
+        <span class="nav-icon">⌨️</span>
+        Terminal
+      </a>
+      <a href="/logs" class="nav-link">
+        <span class="nav-icon">📋</span>
+        Cmd History
+      </a>
+
+      <div class="nav-section">// Management</div>
+      <a href="/invites" class="nav-link">
+        <span class="nav-icon">🔑</span>
+        Invites
+      </a>
+      <a href="/settings" class="nav-link">
+        <span class="nav-icon">⚙️</span>
+        Settings
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      <span class="status-dot"></span> System Online
+    </div>
+  </aside>
+
+  <!-- ══ MAIN ══ -->
+  <div class="main-content">
+    <!-- TOP BAR -->
+    <div class="topbar">
+      <div class="topbar-left">
+        <button class="hamburger" id="hamburger">☰</button>
+        <div class="topbar-breadcrumb">
+          <span>root</span>@vps:~$ <span>{% block breadcrumb %}dashboard{% endblock %}</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span class="topbar-clock" id="topbarClock">--:--:--</span>
+        <span class="topbar-clock" id="lastUpdate" style="color:var(--green-dim)"></span>
+        <button class="topbar-btn" onclick="doLogout()">[ LOGOUT ]</button>
+      </div>
+    </div>
+
+    <!-- PAGE CONTENT -->
+    <div class="page-content">
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+</div>
+{% endblock %}

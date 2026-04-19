@@ -1,0 +1,133 @@
+{% extends "layout.html" %}
+{% block title %}CyberTerm // Dashboard{% endblock %}
+{% block breadcrumb %}dashboard{% endblock %}
+
+{% block content %}
+<div class="page-title">// System Overview</div>
+<h1 class="page-heading">Device Monitor</h1>
+
+<!-- ── STATS ── -->
+<div class="stats-grid">
+  <div class="stat-box">
+    <div class="stat-label">Total Devices</div>
+    <div class="stat-value" id="statTotal">—</div>
+    <div class="stat-sub">registered phones</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-label">Connected</div>
+    <div class="stat-value cyan" id="statConnected">—</div>
+    <div class="stat-sub">tunnel established</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-label">Active</div>
+    <div class="stat-value" id="statActive">—</div>
+    <div class="stat-sub">reporting stats</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-label">VPS Host</div>
+    <div class="stat-value cyan" style="font-size:1rem" id="statHost">—</div>
+    <div class="stat-sub">port range 2222-2230</div>
+  </div>
+</div>
+
+<!-- ── PHONE CARDS ── -->
+<div class="phones-grid" id="phonesGrid">
+  <div class="empty-state" style="grid-column:1/-1">
+    <span class="loading-text">Scanning devices</span>
+  </div>
+</div>
+
+<!-- ═══ PHONE DETAIL MODAL ═══ -->
+<div class="phone-modal-overlay" id="phoneModalOverlay">
+  <div class="phone-modal">
+    <!-- Header -->
+    <div class="phone-modal-header">
+      <h3 id="pmName">Phone</h3>
+      <button class="phone-modal-close" onclick="closePhoneModal()">&times;</button>
+    </div>
+
+    <!-- Tabs -->
+    <div class="phone-modal-tabs">
+      <button class="phone-modal-tab active" data-tab="info" onclick="switchModalTab('info')">Info</button>
+      <button class="phone-modal-tab" data-tab="files" onclick="switchModalTab('files')">Files</button>
+      <button class="phone-modal-tab" data-tab="terminal" onclick="switchModalTab('terminal')">Terminal</button>
+      <button class="phone-modal-tab" data-tab="config" onclick="switchModalTab('config')">Config</button>
+    </div>
+
+    <div class="phone-modal-body">
+      <!-- INFO TAB -->
+      <div class="phone-modal-section active" id="pmSec_info">
+        <div id="pmInfo"><span class="loading-text">Loading</span></div>
+      </div>
+
+      <!-- FILES TAB -->
+      <div class="phone-modal-section" id="pmSec_files">
+        <div class="file-browser">
+          <div class="file-browser-toolbar">
+            <button class="btn btn-sm" onclick="fileBrowseUp()" title="Go up">⬆ Parent</button>
+            <div class="file-breadcrumb" id="fileBreadcrumb">/sdcard</div>
+            <div style="flex:1"></div>
+            <button class="btn btn-sm" id="fileSelectAllBtn" onclick="fileSelectAll()">Select All</button>
+            <button class="btn btn-sm btn-green" id="fileDownloadSelectedBtn" onclick="fileDownloadSelected()" style="display:none">⬇ Download Selected</button>
+          </div>
+          <div class="file-list" id="fileList">
+            <div class="file-loading">Click a folder to browse files</div>
+          </div>
+          <div class="file-status" id="fileStatus"></div>
+        </div>
+      </div>
+
+      <!-- TERMINAL TAB -->
+      <div class="phone-modal-section" id="pmSec_terminal">
+        <div class="modal-terminal">
+          <div class="modal-terminal-topbar">
+            <div class="modal-terminal-dots">
+              <span class="d-r"></span><span class="d-y"></span><span class="d-g"></span>
+            </div>
+            <div style="flex:1;text-align:center;font-size:0.7rem;color:var(--text-muted)">ssh — remote execution</div>
+            <button class="btn btn-sm" onclick="clearModalTerminal()">Clear</button>
+          </div>
+          <div class="modal-terminal-quick">
+            <button class="quick-cmd" onclick="modalQuickCmd('whoami && uname -a')">sysinfo</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('termux-battery-status 2>/dev/null || echo Needs termux-api')">battery</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('df -h /sdcard /data 2>/dev/null')">storage</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('free -h')">memory</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('ps aux | head -15')">processes</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('ifconfig 2>/dev/null || echo N/A')">network</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('ls /sdcard/DCIM/Camera/ | tail -10')">photos</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('cat ~/tunnel.log | tail -10')">tunnel.log</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('date && uptime')">uptime</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('termux-microphone-record -f /sdcard/recording.wav -l 10 2>/dev/null && echo Recording... || echo Needs termux-api')">🎤 rec</button>
+            <button class="quick-cmd" onclick="modalQuickCmd('termux-vibrate -d 500 2>/dev/null || echo Needs termux-api')">📳 vibrate</button>
+          </div>
+          <div class="modal-terminal-input">
+            <input type="text" id="pmTermInput" placeholder="$ enter command...">
+            <button onclick="runModalCmd()">RUN</button>
+          </div>
+          <div class="modal-terminal-output" id="pmTermOutput"><span class="info">Ready.</span></div>
+        </div>
+      </div>
+
+      <!-- CONFIG TAB -->
+      <div class="phone-modal-section" id="pmSec_config">
+        <div class="form-group">
+          <label class="form-label">Phone Name</label>
+          <input type="text" id="pmPhoneName" class="form-input" placeholder="e.g. My Phone">
+        </div>
+        <div class="form-group">
+          <label class="form-label">SSH Password</label>
+          <div class="password-field">
+            <input type="password" id="pmPassword" class="form-input" placeholder="phone SSH password">
+            <button class="password-toggle" onclick="togglePasswordVis(this)">👁</button>
+          </div>
+          <div style="color:var(--text-muted);font-size:0.65rem;margin-top:4px">
+            The password set on the phone's Termux user. Used for SSH fallback if key auth fails.
+          </div>
+        </div>
+        <button class="btn btn-green" onclick="savePhoneConfig()" style="width:100%">[ SAVE CONFIG ]</button>
+        <div id="pmConfigMsg" style="display:none;margin-top:0.5rem;font-size:0.8rem;text-align:center"></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

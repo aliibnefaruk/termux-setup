@@ -1,0 +1,86 @@
+{% extends "layout.html" %}
+{% block title %}CyberTerm // Terminal{% endblock %}
+{% block breadcrumb %}terminal{% endblock %}
+
+{% block content %}
+<div class="page-title">// Remote Execution</div>
+<h1 class="page-heading">Remote Terminal</h1>
+
+<div class="terminal-container">
+  <!-- Window chrome -->
+  <div class="terminal-topbar">
+    <div class="terminal-dots">
+      <span class="dot-red"></span>
+      <span class="dot-yellow"></span>
+      <span class="dot-green"></span>
+    </div>
+    <div class="terminal-title">ssh — remote command execution</div>
+    <button class="btn btn-sm" onclick="clearTerminal()">Clear</button>
+  </div>
+
+  <!-- Quick commands -->
+  <div class="terminal-controls">
+    <div class="terminal-quick-cmds">
+      <span class="quick-label">System:</span>
+      <button class="quick-cmd" onclick="quickCmd('whoami && uname -a')">sysinfo</button>
+      <button class="quick-cmd" onclick="quickCmd('uptime && date')">uptime</button>
+      <button class="quick-cmd" onclick="quickCmd('free -h')">memory</button>
+      <button class="quick-cmd" onclick="quickCmd('ps aux | wc -l && ps aux | head -20')">processes</button>
+      <button class="quick-cmd" onclick="quickCmd('dpkg -l | grep ^ii | wc -l')">packages</button>
+    </div>
+    <div class="terminal-quick-cmds">
+      <span class="quick-label">Battery:</span>
+      <button class="quick-cmd" onclick="quickCmd('termux-battery-status 2>/dev/null || dumpsys battery 2>/dev/null | head -15 || echo Battery info requires termux-api')">battery</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-wifi-connectioninfo 2>/dev/null || echo Requires: pkg install termux-api')">wifi</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-telephony-deviceinfo 2>/dev/null || echo Requires: pkg install termux-api')">device</button>
+    </div>
+    <div class="terminal-quick-cmds">
+      <span class="quick-label">Storage:</span>
+      <button class="quick-cmd" onclick="quickCmd('df -h /sdcard /data 2>/dev/null')">storage</button>
+      <button class="quick-cmd" onclick="quickCmd('ls -la /sdcard/ | head -30')">sdcard</button>
+      <button class="quick-cmd" onclick="quickCmd('ls /sdcard/DCIM/Camera/ | tail -15')">photos</button>
+      <button class="quick-cmd" onclick="quickCmd('ls /sdcard/Download/ | tail -15')">downloads</button>
+      <button class="quick-cmd" onclick="quickCmd('du -sh /sdcard/DCIM/ /sdcard/Download/ /sdcard/WhatsApp/ 2>/dev/null')">folder sizes</button>
+    </div>
+    <div class="terminal-quick-cmds">
+      <span class="quick-label">Network:</span>
+      <button class="quick-cmd" onclick="quickCmd('ifconfig 2>/dev/null || ip addr 2>/dev/null || echo No network tools')">network</button>
+      <button class="quick-cmd" onclick="quickCmd('curl -s ifconfig.me 2>/dev/null || echo N/A')">public ip</button>
+      <button class="quick-cmd" onclick="quickCmd('ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || echo N/A')">ports</button>
+    </div>
+    <div class="terminal-quick-cmds">
+      <span class="quick-label">Termux:</span>
+      <button class="quick-cmd" onclick="quickCmd('tmux ls 2>/dev/null || echo No tmux sessions')">tmux</button>
+      <button class="quick-cmd" onclick="quickCmd('cat ~/tunnel.log | tail -10')">tunnel.log</button>
+      <button class="quick-cmd" onclick="quickCmd('cat /data/data/com.termux/files/usr/etc/termux-version 2>/dev/null')">version</button>
+      <button class="quick-cmd" onclick="quickCmd('pkg list-installed 2>/dev/null | head -30')">installed</button>
+    </div>
+    <div class="terminal-quick-cmds">
+      <span class="quick-label">Media:</span>
+      <button class="quick-cmd" onclick="quickCmd('termux-microphone-record -f /sdcard/recording.wav -l 10 2>/dev/null && echo Recording 10s... || echo Requires: pkg install termux-api')">🎤 Record 10s</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-media-player play /sdcard/recording.wav 2>/dev/null || echo No recording found')">▶ Play</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-camera-photo -c 0 /sdcard/capture.jpg 2>/dev/null && echo Photo saved || echo Requires: pkg install termux-api')">📷 Photo</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-tts-speak \"Hello from dashboard\" 2>/dev/null || echo Requires: pkg install termux-api')">🔊 TTS</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-toast \"Hello from dashboard\" 2>/dev/null || echo Requires: pkg install termux-api')">📢 Toast</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-vibrate -d 500 2>/dev/null || echo Requires: pkg install termux-api')">📳 Vibrate</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-notification --title CyberTerm --content \"Remote ping from dashboard\" 2>/dev/null || echo Requires: pkg install termux-api')">🔔 Notify</button>
+    </div>
+    <div class="terminal-quick-cmds">
+      <span class="quick-label">Permissions:</span>
+      <button class="quick-cmd" onclick="quickCmd('pkg install termux-api -y 2>&1 | tail -5')">Install termux-api</button>
+      <button class="quick-cmd" onclick="quickCmd('termux-setup-storage 2>/dev/null && echo Storage setup done || echo Run manually in Termux')">Setup Storage</button>
+    </div>
+
+    <!-- Command input -->
+    <div class="terminal-input-row">
+      <select id="cmdPhone" class="form-select terminal-phone-select"></select>
+      <input type="text" id="cmdInput" class="form-input" placeholder="$ enter command...">
+      <button class="btn btn-green" onclick="runCmd()">[ RUN ]</button>
+    </div>
+  </div>
+
+  <!-- Output -->
+  <div class="terminal-output" id="cmdOutput" style="min-height:350px;max-height:600px"><span class="info">Ready. Select a device and enter a command.
+Type a command or click a quick action above.</span></div>
+</div>
+{% endblock %}

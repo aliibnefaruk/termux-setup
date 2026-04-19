@@ -1,0 +1,68 @@
+{% extends "layout.html" %}
+{% block title %}CyberTerm // Invites{% endblock %}
+{% block breadcrumb %}invites{% endblock %}
+
+{% block content %}
+<div class="page-title">// Access Control</div>
+<h1 class="page-heading">Invite Tokens</h1>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+  <!-- Generate -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-header-title">Generate New Invite</span>
+    </div>
+    <div class="card-body">
+      <p style="color:var(--text-dim);font-size:0.8rem;margin-bottom:1rem">
+        Create a token for a family member's phone.<br>
+        They won't need the VPS password.
+      </p>
+      <div class="form-group">
+        <label class="form-label">Tunnel Port</label>
+        <input type="number" id="invitePort" class="form-input"
+               value="2223" min="2222" max="2230">
+        <div style="color:var(--text-muted);font-size:0.65rem;margin-top:4px">
+          2222 = first phone, 2223 = second, etc.
+        </div>
+      </div>
+      <button class="btn btn-green" onclick="generateInvite()" style="width:100%">
+        [ GENERATE TOKEN ]
+      </button>
+
+      <div id="inviteResult" style="display:none;margin-top:1rem">
+        <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:0.75rem;margin-bottom:0.5rem">
+          <div style="color:var(--text-muted);font-size:0.6rem;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">
+            Install Command (run on phone)
+          </div>
+          <div id="inviteCmd" style="color:var(--cyan);font-size:0.75rem;word-break:break-all;user-select:all"></div>
+        </div>
+        <button class="btn btn-cyan copy-btn" onclick="copyInviteCmd()" style="width:100%">[ COPY ]</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-header-title">Invite History</span>
+      <button class="btn btn-sm" onclick="loadInvites()">Refresh</button>
+    </div>
+    <div class="card-body" style="padding:0">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Token</th>
+            <th>Port</th>
+            <th>Status</th>
+            <th>Used By</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody id="invitesTableBody">
+          <tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

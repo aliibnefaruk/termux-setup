@@ -1,0 +1,18 @@
+{% extends "layout.html" %}
+{% block title %}CyberTerm // Logs{% endblock %}
+{% block breadcrumb %}logs{% endblock %}
+
+{% block content %}
+<div class="page-title">// Audit Trail</div>
+<h1 class="page-heading">Command History</h1>
+
+<div class="card">
+  <div class="card-header">
+    <span class="card-header-title">Recent Commands (last 50)</span>
+    <button class="btn btn-sm" onclick="loadCommandHistory()">Refresh</button>
+  </div>
+  <div class="card-body" style="padding:0" id="logsContainer">
+    <span class="loading-text" style="padding:1rem;display:block">Fetching logs</span>
+  </div>
+</div>
+{% endblock %}

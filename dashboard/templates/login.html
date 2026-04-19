@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}CyberTerm // Access Required{% endblock %}
+{% block body %}
+<div class="login-container">
+
+  <div class="login-ascii">
+ ██████╗██╗   ██╗██████╗ ███████╗██████╗ ████████╗███████╗██████╗ ███╗   ███╗
+██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗╚══██╔══╝██╔════╝██╔══██╗████╗ ████║
+██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝   ██║   █████╗  ██████╔╝██╔████╔██║
+██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗   ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║
+╚██████╗   ██║   ██████╔╝███████╗██║  ██║   ██║   ███████╗██║  ██║██║ ╚═╝ ██║
+ ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝
+  </div>
+
+  <div class="login-box">
+    <div class="login-title">[ Authentication Required ]</div>
+    <div class="login-sub">Termux Remote Access Console v2.0</div>
+
+    <form id="loginForm">
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input type="password" id="loginPassword" class="form-input"
+               placeholder="Enter access key..." autofocus required>
+      </div>
+      <button type="submit" class="btn btn-green">[ AUTHENTICATE ]</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+
+  <div class="login-footer">
+    Encrypted connection &bull; All sessions logged
+  </div>
+</div>
+{% endblock %}

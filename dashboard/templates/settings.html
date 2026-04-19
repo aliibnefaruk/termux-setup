@@ -1,0 +1,103 @@
+{% extends "layout.html" %}
+{% block title %}CyberTerm // Settings{% endblock %}
+{% block breadcrumb %}settings{% endblock %}
+
+{% block content %}
+<div class="page-title">// Configuration</div>
+<h1 class="page-heading">System Settings</h1>
+
+<div class="settings-grid">
+  <!-- System Info -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-header-title">VPS System Info</span>
+    </div>
+    <div class="card-body">
+      <div class="setting-row">
+        <span class="setting-key">HOSTNAME</span>
+        <span class="setting-val" id="sysHostname">loading...</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-key">UPTIME</span>
+        <span class="setting-val" id="sysUptime">loading...</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-key">MEMORY</span>
+        <span class="setting-val" id="sysMem">loading...</span>
+      </div>
+      <div class="setting-row">
+        <span class="setting-key">DISK</span>
+        <span class="setting-val" id="sysDisk">loading...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change Password -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-header-title">Change Dashboard Password</span>
+    </div>
+    <div class="card-body">
+      <form id="passForm">
+        <div class="form-group">
+          <label class="form-label">Current Password</label>
+          <input type="password" id="currentPass" class="form-input"
+                 placeholder="••••••••" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">New Password</label>
+          <input type="password" id="newPass" class="form-input"
+                 placeholder="min 6 characters" required minlength="6">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm New Password</label>
+          <input type="password" id="confirmPass" class="form-input"
+                 placeholder="repeat new password" required>
+        </div>
+        <button type="submit" class="btn btn-green" style="width:100%">
+          [ UPDATE PASSWORD ]
+        </button>
+        <div id="passMsg" style="display:none;margin-top:0.5rem;font-size:0.8rem;text-align:center"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Phone SSH Credentials -->
+  <div class="card" style="grid-column:1/-1">
+    <div class="card-header">
+      <span class="card-header-title">Phone SSH Credentials</span>
+      <button class="btn btn-sm" onclick="loadPhoneCredentials()">Refresh</button>
+    </div>
+    <div class="card-body" style="padding:0">
+      <div style="padding:0.5rem 0.75rem;font-size:0.7rem;color:var(--text-muted);border-bottom:1px solid var(--border)">
+        Manage SSH passwords for each connected phone. Passwords are used as fallback when key-based auth fails.
+      </div>
+      <table class="cred-table">
+        <thead>
+          <tr>
+            <th>Phone</th>
+            <th>User</th>
+            <th>Port</th>
+            <th>SSH Password</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="phoneCredsBody">
+          <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:1rem">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Environment Config -->
+  <div class="card" style="grid-column:1/-1">
+    <div class="card-header">
+      <span class="card-header-title">Environment Configuration</span>
+      <button class="btn btn-sm" onclick="loadSettings()">Refresh</button>
+    </div>
+    <div class="card-body" id="settingsEnv">
+      <span class="loading-text">Loading config</span>
+    </div>
+  </div>
+</div>
+{% endblock %}
