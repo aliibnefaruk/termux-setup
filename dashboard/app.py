@@ -505,7 +505,7 @@ def api_invite():
     token = create_invite(port)
     return jsonify({
         "success": True, "token": token,
-        "install_command": f"PHONE_PASS=SETPASSWORD TOKEN={token} curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh | bash",
+        "install_command": f"export PHONE_PASS=SETPASSWORD TOKEN={token}; curl -sL https://raw.githubusercontent.com/aliibnefaruk/termux-setup/main/install.sh | bash",
     })
 
 
