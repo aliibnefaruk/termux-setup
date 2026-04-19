@@ -484,7 +484,12 @@ async function loadPhoneSysInfo() {
   }
 
   const s = phone.stats || {};
-  const batNum = parseInt(s.BAT) || 0;
+  // Use sysinfo battery if stats don't have it
+  let batText = s.BAT || 'N/A';
+  if (batText === 'N/A' && data.BAT_LEVEL && data.BAT_LEVEL !== 'N/A') {
+    batText = data.BAT_LEVEL + '% (' + (data.BAT_STATUS || 'N/A') + ')';
+  }
+  const batNum = parseInt(batText) || 0;
   const memNum = parseInt(s.MEM) || 0;
   const storNum = parseInt(s.STORAGE) || 0;
   const tunnelUp = (s.TUNNEL || '').toUpperCase() === 'ACTIVE';
@@ -494,7 +499,7 @@ async function loadPhoneSysInfo() {
   };
 
   let html = '<div class="phone-metrics">' +
-    metricHTML('Battery', s.BAT, batNum, barColor(batNum, false)) +
+    metricHTML('Battery', batText, batNum, barColor(batNum, false)) +
     metricHTML('Memory', s.MEM, memNum, barColor(memNum, true)) +
     metricHTML('Storage', s.STORAGE, storNum, barColor(storNum, true)) +
     '<div class="metric"><span class="metric-label">Tunnel</span><span class="metric-value" style="color:' + (tunnelUp ? 'var(--green)' : 'var(--red)') + '">' + (tunnelUp ? 'ACTIVE' : esc(s.TUNNEL || 'N/A')) + '</span></div>' +
@@ -506,6 +511,7 @@ async function loadPhoneSysInfo() {
   const fields = [
     ['USER', 'User'], ['KERNEL', 'Kernel'], ['ARCH', 'Architecture'],
     ['HOSTNAME', 'Hostname'], ['UPTIME', 'Uptime'], ['DATE', 'Date/Time'],
+    ['BAT_LEVEL', 'Battery Level'], ['BAT_STATUS', 'Battery Status'],
     ['STORAGE_TOTAL', 'Storage Total'], ['STORAGE_USED', 'Storage Used'],
     ['STORAGE_AVAIL', 'Storage Free'], ['STORAGE_PCT', 'Storage Used %'],
     ['MEM_TOTAL', 'RAM Total'], ['MEM_USED', 'RAM Used'], ['MEM_FREE', 'RAM Free'],
@@ -636,6 +642,27 @@ function quickCmdPhone(port, user, cmd) {
 function clearTerminal() {
   const output = document.getElementById('cmdOutput');
   if (output) output.innerHTML = '<span class="info">Terminal cleared. Ready.</span>';
+}
+
+function copyTerminalOutput(elemId) {
+  const el = document.getElementById(elemId);
+  if (!el) return;
+  const text = el.innerText || el.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  }).catch(() => {
+    // Fallback for older browsers
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    document.execCommand('copy');
+    sel.removeAllRanges();
+  });
 }
 
 // ═══════════════════════ INVITES ═══════════════════════

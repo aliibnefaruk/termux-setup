@@ -33,7 +33,7 @@ VPS_SSH_PORT="22"
 TUNNEL_PORT="${TUNNEL_PORT:-2222}"
 LOCAL_SSH_PORT="8022"
 DASH_PORT="8080"
-DASH_URL="${DASH_URL:-http://${VPS_IP}:${DASH_PORT}}"
+DASH_URL="${DASH_URL:-https://termux.mohammedfaruk.in}"
 REPO_URL="https://github.com/aliibnefaruk/termux-setup.git"
 INSTALL_DIR="$HOME/termux-setup"
 LOG_DIR="$HOME/logs"
@@ -120,14 +120,31 @@ else
     fi
 fi
 
-# Start SSH server
-sshd 2>/dev/null || true
+# Generate SSH host keys if missing (required for sshd to start)
+if [ ! -f "$PREFIX/etc/ssh/ssh_host_rsa_key" ]; then
+    log_info "Generating SSH host keys..."
+    ssh-keygen -A 2>/dev/null
+fi
 
-# Check if sshd is running (use pgrep — ss may fail with Permission denied in Termux)
+# Start SSH server
+if ! pgrep -x sshd >/dev/null 2>&1; then
+    sshd
+    sleep 1
+fi
+
+# Check if sshd is running
 if pgrep -x sshd >/dev/null 2>&1; then
     log_info "SSH server running (port ${LOCAL_SSH_PORT})"
 else
-    log_warn "SSH server may not have started. Try running: sshd"
+    log_warn "SSH server failed to start. Trying ssh-keygen -A and retry..."
+    ssh-keygen -A 2>/dev/null
+    sshd
+    sleep 1
+    if pgrep -x sshd >/dev/null 2>&1; then
+        log_info "SSH server running (port ${LOCAL_SSH_PORT})"
+    else
+        log_error "SSH server could not start. Run manually: sshd -d"
+    fi
 fi
 
 # ===== STEP 4: Generate SSH key & copy to VPS =====

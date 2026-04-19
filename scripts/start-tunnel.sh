@@ -25,13 +25,27 @@ log() {
 check_ssh_running() {
     if ! pgrep -x sshd >/dev/null 2>&1; then
         log "⚠️  SSH server not running. Starting..."
+        # Generate host keys if missing (common on fresh Termux installs)
+        if [ ! -f "$PREFIX/etc/ssh/ssh_host_rsa_key" ]; then
+            log "Generating SSH host keys..."
+            ssh-keygen -A 2>/dev/null
+        fi
         sshd
         sleep 1
         if pgrep -x sshd >/dev/null 2>&1; then
             log "✅ SSH server started on port ${LOCAL_SSH_PORT}"
         else
-            log "❌ Failed to start SSH server"
-            return 1
+            # Last resort: regenerate keys and retry
+            log "Retrying with fresh host keys..."
+            ssh-keygen -A 2>/dev/null
+            sshd
+            sleep 1
+            if pgrep -x sshd >/dev/null 2>&1; then
+                log "✅ SSH server started on port ${LOCAL_SSH_PORT}"
+            else
+                log "❌ Failed to start SSH server. Run: sshd -d"
+                return 1
+            fi
         fi
     fi
     return 0

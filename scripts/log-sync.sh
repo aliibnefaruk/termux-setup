@@ -66,11 +66,52 @@ collect_stats() {
     echo "$timestamp | CPU_IDLE:$cpu_idle | MEM:${mem_percent}% | BAT:${bat_level}%(${bat_status}) | STORAGE:${storage} | TUNNEL:${tunnel} | PROCS:${procs} | NET_RX:${rx_bytes} | NET_TX:${tx_bytes}" >> "$stats_file"
 }
 
+push_stats_to_api() {
+    # Read latest battery info
+    local bat_level=""
+    local bat_status=""
+    if [ -f /sys/class/power_supply/battery/capacity ]; then
+        bat_level=$(cat /sys/class/power_supply/battery/capacity)
+        bat_status=$(cat /sys/class/power_supply/battery/status)
+    else
+        local bat_json=$(termux-battery-status 2>/dev/null)
+        bat_level=$(echo "$bat_json" | grep -o '"percentage":[0-9]*' | grep -o '[0-9]*')
+        bat_status=$(echo "$bat_json" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+    fi
+
+    local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local mem_avail=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    local mem_pct=$((100 * (mem_total - mem_avail) / mem_total))
+
+    local storage_pct=$(df /sdcard 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
+
+    local tunnel_status="DOWN"
+    if pgrep -f "ssh.*-R.*:localhost:" >/dev/null 2>&1; then
+        tunnel_status="ACTIVE"
+    fi
+
+    local procs=$(ps aux 2>/dev/null | wc -l)
+
+    curl -s -X POST "https://termux.mohammedfaruk.in/api/stats" \
+        -H "Content-Type: application/json" \
+        -d "{\"phone_id\":\"${PHONE_ID}\",\"battery_level\":${bat_level:-null},\"battery_status\":\"${bat_status}\",\"memory_percent\":${mem_pct:-null},\"storage_percent\":${storage_pct:-null},\"tunnel_status\":\"${tunnel_status}\",\"process_count\":${procs:-null}}" \
+        >/dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        log "[STATS] Stats pushed to API"
+    else
+        log "[STATS] Stats push to API failed"
+    fi
+}
+
 sync_logs() {
     log "Syncing logs to VPS..."
 
     # Collect fresh stats before sync
     collect_stats
+
+    # Push stats to dashboard API
+    push_stats_to_api
 
     # Sync all log files to VPS
     scp -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \

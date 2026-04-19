@@ -12,6 +12,7 @@ import secrets
 import tempfile
 import shutil
 import re
+import threading
 from datetime import datetime
 from functools import wraps
 
@@ -200,17 +201,27 @@ def get_connected_phones():
             "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
-    # 6. Live check ESTAB
+    # 6. Live check — update status with quick TCP connect test
+    import socket
     for ph in phones:
         port = ph.get("tunnel_port")
         if not port:
             continue
+        if port not in listening:
+            ph["status"] = "offline"
+            continue
+        # Port is listening, but is the phone actually reachable?
         try:
-            r = subprocess.run(["ss", "-tn", f"sport = :{port}"], capture_output=True, text=True, timeout=5)
-            if "ESTAB" in r.stdout:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex(("127.0.0.1", port))
+            sock.close()
+            if result == 0:
                 ph["status"] = "connected"
+            else:
+                ph["status"] = "stale"
         except Exception:
-            pass
+            ph["status"] = "stale"
 
     # 7. Auto-assign remaining port-less phones
     used = {p["tunnel_port"] for p in phones if p["tunnel_port"]}
@@ -638,6 +649,32 @@ def api_stats():
     return jsonify({"success": True})
 
 
+@app.route("/api/phone/<phone_id>/refresh-stats", methods=["POST"])
+@login_required
+def api_refresh_stats(phone_id):
+    """Manually trigger stats fetch from a connected phone via SSH."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM phones WHERE phone_id=%s", (phone_id,))
+            phone = cur.fetchone()
+    finally:
+        conn.close()
+    if not phone:
+        return jsonify({"error": "Phone not found"}), 404
+    port = phone["tunnel_port"]
+    # Check if port is listening
+    try:
+        r = subprocess.run(["ss", "-tuln"], capture_output=True, text=True, timeout=5)
+        if f":{port}" not in r.stdout:
+            return jsonify({"error": "Phone not connected (tunnel down)"}), 400
+    except Exception:
+        pass
+    _fetch_and_store_stats(phone)
+    return jsonify({"success": True, "stats": _get_phone_stats(phone_id)})
+
+
+
 @app.route("/api/command-history")
 @login_required
 def api_command_history():
@@ -930,22 +967,33 @@ def api_phone_sysinfo(phone_id):
     if not port:
         return jsonify({"error": "Phone not found"}), 404
 
-    info_cmd = (
-        'echo "___USER:$(whoami)";'
-        'echo "___KERNEL:$(uname -sr)";'
-        'echo "___ARCH:$(uname -m)";'
-        'echo "___HOSTNAME:$(hostname 2>/dev/null || echo N/A)";'
-        'echo "___UPTIME:$(uptime -p 2>/dev/null || uptime)";'
-        'echo "___DATE:$(date)";'
-        'df -h /sdcard 2>/dev/null | tail -1 | awk \'{print "___STORAGE_TOTAL:"$2"\\n___STORAGE_USED:"$3"\\n___STORAGE_AVAIL:"$4"\\n___STORAGE_PCT:"$5}\';'
-        'free -h 2>/dev/null | grep Mem | awk \'{print "___MEM_TOTAL:"$2"\\n___MEM_USED:"$3"\\n___MEM_FREE:"$4}\';'
-        'echo "___PROCS:$(ps aux 2>/dev/null | wc -l)";'
-        'echo "___TERMUX_VER:$(cat /data/data/com.termux/files/usr/etc/termux-version 2>/dev/null || echo N/A)";'
-        'echo "___PKG_COUNT:$(dpkg -l 2>/dev/null | grep ^ii | wc -l)";'
-        'ls /sdcard/DCIM/Camera/ 2>/dev/null | wc -l | xargs -I{} echo "___PHOTOS:{}";'
-        'du -sh /sdcard/DCIM/Camera/ 2>/dev/null | awk \'{print "___PHOTOS_SIZE:"$1}\';'
-        'echo "___SHELL:$SHELL";'
-    )
+    info_cmd = """
+echo "___USER:$(whoami)"
+echo "___KERNEL:$(uname -sr)"
+echo "___ARCH:$(uname -m)"
+echo "___HOSTNAME:$(hostname 2>/dev/null || echo N/A)"
+echo "___UPTIME:$(uptime -p 2>/dev/null || uptime)"
+echo "___DATE:$(date)"
+bat_level=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)
+bat_status=$(cat /sys/class/power_supply/battery/status 2>/dev/null)
+if [ -z "$bat_level" ]; then
+  bat_json=$(termux-battery-status 2>/dev/null)
+  if [ -n "$bat_json" ]; then
+    bat_level=$(echo "$bat_json" | grep percentage | tr -dc '0-9')
+    bat_status=$(echo "$bat_json" | grep '"status"' | awk -F'"' '{print $4}')
+  fi
+fi
+echo "___BAT_LEVEL:${bat_level:-N/A}"
+echo "___BAT_STATUS:${bat_status:-N/A}"
+df -h /sdcard 2>/dev/null | tail -1 | awk '{print "___STORAGE_TOTAL:"$2"\\n___STORAGE_USED:"$3"\\n___STORAGE_AVAIL:"$4"\\n___STORAGE_PCT:"$5}'
+free -h 2>/dev/null | grep Mem | awk '{print "___MEM_TOTAL:"$2"\\n___MEM_USED:"$3"\\n___MEM_FREE:"$4}'
+echo "___PROCS:$(ps aux 2>/dev/null | wc -l)"
+echo "___TERMUX_VER:$(cat /data/data/com.termux/files/usr/etc/termux-version 2>/dev/null || echo N/A)"
+echo "___PKG_COUNT:$(dpkg -l 2>/dev/null | grep ^ii | wc -l)"
+ls /sdcard/DCIM/Camera/ 2>/dev/null | wc -l | xargs -I{} echo "___PHOTOS:{}"
+du -sh /sdcard/DCIM/Camera/ 2>/dev/null | awk '{print "___PHOTOS_SIZE:"$1}'
+echo "___SHELL:$SHELL"
+"""
     result = run_phone_command(port, user, info_cmd, ssh_password=pw)
     raw = result.get("output", "")
 
@@ -959,6 +1007,100 @@ def api_phone_sysinfo(phone_id):
 
 
 # ═══════════════════════════════════════════════════════════
+# ───────────────────── BACKGROUND STATS FETCHER ──────────────────────
+
+# Uses simple grep/awk/tr to avoid sed escaping issues through SSH
+STATS_FETCH_CMD = """
+bat_level=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null)
+bat_status=$(cat /sys/class/power_supply/battery/status 2>/dev/null)
+if [ -z "$bat_level" ]; then
+  bat_json=$(termux-battery-status 2>/dev/null)
+  if [ -n "$bat_json" ]; then
+    bat_level=$(echo "$bat_json" | grep percentage | tr -dc '0-9')
+    bat_status=$(echo "$bat_json" | grep '"status"' | awk -F'"' '{print $4}')
+  fi
+fi
+mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+mem_avail=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+mem_pct=$((100 * (mem_total - mem_avail) / mem_total))
+storage_pct=$(df /sdcard 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
+tunnel="DOWN"
+pgrep -f 'ssh.*-R.*:localhost:' >/dev/null 2>&1 && tunnel="ACTIVE"
+procs=$(ps aux 2>/dev/null | wc -l)
+echo "BAT_LEVEL:${bat_level:-}"
+echo "BAT_STATUS:${bat_status:-}"
+echo "MEM_PCT:${mem_pct:-}"
+echo "STORAGE_PCT:${storage_pct:-}"
+echo "TUNNEL:${tunnel}"
+echo "PROCS:${procs}"
+"""
+
+
+def _fetch_and_store_stats(phone):
+    """SSH into a connected phone and save its stats to DB."""
+    port = phone.get("tunnel_port")
+    user = phone.get("user")
+    pid = phone.get("phone_id") or phone.get("id")
+    pw = phone.get("ssh_password") or ""
+    if not port or not user or not pid:
+        return
+    result = run_phone_command(port, user, STATS_FETCH_CMD, ssh_password=pw, timeout=10)
+    raw = result.get("output", "")
+    if result.get("code", -1) != 0 or not raw.strip():
+        return
+    data = {}
+    for line in raw.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            data[k.strip()] = v.strip()
+    stats = {
+        "battery_level": int(data["BAT_LEVEL"]) if data.get("BAT_LEVEL", "").isdigit() else None,
+        "battery_status": data.get("BAT_STATUS", ""),
+        "memory_percent": int(data["MEM_PCT"]) if data.get("MEM_PCT", "").isdigit() else None,
+        "storage_percent": int(data["STORAGE_PCT"]) if data.get("STORAGE_PCT", "").isdigit() else None,
+        "tunnel_status": data.get("TUNNEL", "DOWN"),
+        "process_count": int(data["PROCS"]) if data.get("PROCS", "").isdigit() else None,
+    }
+    _save_phone_stats(pid, stats)
+
+
+def _stats_collector_loop():
+    """Background loop: fetch stats from connected phones every 60s."""
+    import socket
+    while True:
+        try:
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT phone_id, user, tunnel_port, ssh_password FROM phones")
+                db_phones = cur.fetchall()
+            conn.close()
+
+            for phone in db_phones:
+                port = phone.get("tunnel_port")
+                if not port:
+                    continue
+                # Quick TCP connectivity check (2s timeout)
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(2)
+                    reachable = sock.connect_ex(("127.0.0.1", port)) == 0
+                    sock.close()
+                except Exception:
+                    reachable = False
+                if reachable:
+                    try:
+                        _fetch_and_store_stats(phone)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        time.sleep(60)
+
+
+# Start background stats collector thread
+_stats_thread = threading.Thread(target=_stats_collector_loop, daemon=True)
+_stats_thread.start()
+
 
 if __name__ == "__main__":
     print("\033[32m")
